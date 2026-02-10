@@ -1,4 +1,3 @@
-import re
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote_plus
@@ -6,160 +5,135 @@ from flask import Flask, request, render_template_string
 
 app = Flask(__name__)
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (AL-Yurist demo)"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (AL-Yurist)"}
 
-# Асосий очиқ манбалар (lex.uz) — тез кириш учун
-SOURCES = [
-    ("mehnat", "Меҳнат кодекси (2022)", "https://lex.uz/ru/docs/-6257288"),
-    ("jinoyat", "Жиноят кодекси", "https://lex.uz/docs/-111453"),
-    ("mamuriy", "Маъмурий жавобгарлик тўғрисидаги кодекс", "https://lex.uz/docs/-97664"),
-    ("konst", "Конституция (2023)", "https://lex.uz/docs/-6445145"),
-    ("fuqarolik", "Фуқаролик кодекси", "https://lex.uz/docs/-111189"),
-    ("davxizm", "«Давлат фуқаролик хизмати тўғрисида» Қонун", "https://lex.uz/docs/-6145972"),
-]
+CATEGORIES = {
+    "mehnat": {
+        "title": "Меҳнат кодекси",
+        "hint": "ишга қабул қилиш, ишдан бўшатиш, меҳнат шартномаси",
+        "lex": "https://lex.uz/uz/search/loc?query="
+    },
+    "qonun": {
+        "title": "Қонун қоидалар (умумий)",
+        "hint": "қонун, қарор, фармойиш",
+        "lex": "https://lex.uz/uz/search/loc?query="
+    },
+    "mamuriy": {
+        "title": "Маъмурий жавобгарлик",
+        "hint": "жарима, маъмурий жавобгарлик",
+        "lex": "https://lex.uz/uz/search/loc?query="
+    },
+    "jinoyat": {
+        "title": "Жиноий жавобгарлик",
+        "hint": "жиноят таркиби, жавобгарлик",
+        "lex": "https://lex.uz/uz/search/loc?query="
+    },
+    "konst": {
+        "title": "Конституция",
+        "hint": "фуқаро ҳуқуқлари, давлат",
+        "lex": "https://lex.uz/uz/search/loc?query="
+    },
+    "davxizm": {
+        "title": "Давлат фуқаролик хизмати",
+        "hint": "давлат хизматчиси, хизмат ўташ",
+        "lex": "https://lex.uz/uz/search/loc?query="
+    }
+}
 
 HTML = """
 <!doctype html>
 <html lang="uz">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>AL Юрист</title>
-  <style>
-    :root{
-      --bg:#0b1220; --card:#121b2f; --line:#253358;
-      --text:#eaf0ff; --muted:#a9b6d6; --btn:#3b82f6;
-    }
-    *{box-sizing:border-box}
-    body{margin:0;font-family:system-ui,Segoe UI,Arial;background:var(--bg);color:var(--text)}
-    .wrap{max-width:980px;margin:0 auto;padding:22px 14px 40px}
-    .top{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}
-    h1{margin:0;font-size:22px}
-    .badge{border:1px solid var(--line);color:var(--muted);padding:6px 10px;border-radius:999px;font-size:12px}
-    .grid{display:grid;grid-template-columns:1.35fr .65fr;gap:12px}
-    @media (max-width:900px){.grid{grid-template-columns:1fr}}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
-    .label{color:var(--muted);font-size:12px;margin-bottom:8px}
-    textarea{width:100%;min-height:120px;background:#0c1428;border:1px solid var(--line);
-      border-radius:12px;padding:12px;color:var(--text);outline:none;resize:vertical}
-    textarea:focus{border-color:var(--btn)}
-    .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;align-items:center}
-    .btn{border:none;background:var(--btn);color:#fff;padding:10px 14px;border-radius:12px;font-weight:700;cursor:pointer}
-    .btn:hover{filter:brightness(1.05)}
-    .hint{color:var(--muted);font-size:12px;line-height:1.35}
-    .chips{display:flex;flex-wrap:wrap;gap:8px}
-    .chip{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:8px 10px;
-      color:var(--text);text-decoration:none;background:#0c1428;font-size:13px}
-    .chip:hover{border-color:var(--btn)}
-    .results{margin-top:12px}
-    .res{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:#0c1428}
-    .res a{color:#93c5fd;text-decoration:none}
-    .res a:hover{text-decoration:underline}
-    .small{color:var(--muted);font-size:12px;margin-top:6px}
-    .empty{border:1px dashed var(--line);border-radius:14px;padding:12px;color:var(--muted);background:#0c1428}
-    .footer{margin-top:16px;color:var(--muted);font-size:12px}
-    .k{font-weight:700}
-  </style>
+<meta charset="utf-8">
+<title>AL Юрист</title>
+<style>
+body{margin:0;font-family:Arial;background:#0b1220;color:#eaf0ff}
+.wrap{max-width:1000px;margin:auto;padding:20px}
+h1{margin-bottom:10px}
+.menu{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:15px}
+.menu a{padding:8px 12px;border-radius:10px;
+background:#121b2f;color:#fff;text-decoration:none;border:1px solid #253358}
+.menu a.active{background:#3b82f6}
+.card{background:#121b2f;border:1px solid #253358;border-radius:14px;padding:15px}
+textarea{width:100%;min-height:110px;background:#0c1428;
+border:1px solid #253358;border-radius:10px;color:#fff;padding:10px}
+button{margin-top:10px;padding:10px 16px;border:none;
+background:#3b82f6;color:#fff;border-radius:10px;font-weight:bold;cursor:pointer}
+.result{margin-top:15px}
+.item{background:#0c1428;border:1px solid #253358;
+border-radius:10px;padding:10px;margin-bottom:10px}
+.item a{color:#93c5fd;text-decoration:none}
+.small{color:#a9b6d6;font-size:12px}
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="top">
-      <div>
-        <h1>AL Юрист — lex.uz асосида қонун/модда топиш</h1>
-        <div class="small">HR буйруқ/қарор ёзаётганда “асос”ни тез топиш учун демо</div>
-      </div>
-      <div class="badge">Free demo</div>
-    </div>
+<div class="wrap">
+<h1>AL Юрист</h1>
+<div class="small">Қонун ва кодекслар бўйича тезкор қидирув (lex.uz)</div>
 
-    <div class="grid">
-      <div class="card">
-        <div class="label">Савол ёки калит сўз (қисқа ёзинг):</div>
-        <form method="post">
-          <textarea name="q" placeholder="Масалан: ишдан бўшатиш, интизомий жазо, меҳнат шартномасини бекор қилиш...">{{ q }}</textarea>
-          <div class="row">
-            <button class="btn" type="submit">Қидириш</button>
-            <div class="hint">
-              Масалан: <span class="k">бўшатиш</span>, <span class="k">интизом</span>, <span class="k">шартнома</span>, <span class="k">маъмурий жавобгарлик</span>
-            </div>
-          </div>
-        </form>
+<div class="menu">
+{% for k,v in categories.items() %}
+<a href="/?cat={{k}}" class="{% if cat==k %}active{% endif %}">{{v.title}}</a>
+{% endfor %}
+</div>
 
-        <div class="results">
-          <div class="label">Топилган натижалар:</div>
+<div class="card">
+<form method="post">
+<textarea name="q" placeholder="{{ categories[cat].hint }}">{{ q }}</textarea>
+<button>Қидириш</button>
+</form>
 
-          {% if results is not none %}
-            {% if results %}
-              {% for r in results %}
-                <div class="res">
-                  <a href="{{ r.url }}" target="_blank">{{ r.title }}</a>
-                  <div class="small">{{ r.url }}</div>
-                </div>
-              {% endfor %}
-              <div class="small">Эслатма: натижалар lex.uz қидирувидан олинади.</div>
-            {% else %}
-              <div class="empty">Ҳеч нарса топилмади. Калит сўзни қисқартириб кўринг (масалан: <b>бўшатиш</b>).</div>
-            {% endif %}
-          {% endif %}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="label">Асосий қонунлар (тез кириш):</div>
-        <div class="chips">
-          {% for key,title,url in sources %}
-            <a class="chip" href="{{ url }}" target="_blank">{{ title }}</a>
-          {% endfor %}
-        </div>
-        <div class="footer">
-          Кейинги босқичда: ҳар бир кодекс матнидан тўғридан-тўғри қидириш (моддагача) қўшамиз.
-        </div>
-      </div>
-    </div>
-
-    <div class="footer">© AL Юрист — демо (очиқ манба: lex.uz)</div>
-  </div>
+<div class="result">
+{% if results %}
+{% for r in results %}
+<div class="item">
+<a href="{{r.url}}" target="_blank">{{r.title}}</a>
+<div class="small">{{r.url}}</div>
+</div>
+{% endfor %}
+{% elif searched %}
+<div class="small">Натижа топилмади. Калит сўзни қисқартириб кўринг.</div>
+{% endif %}
+</div>
+</div>
+</div>
 </body>
 </html>
 """
 
-def normalize_query(q: str) -> str:
-    q = (q or "").strip()
-    q = re.sub(r"\s+", " ", q)
-    # Оддий нормализация: ишдан бўшатилди/бўшатилади -> бўшатиш
-    q = q.replace("бўшатилади", "бўшатиш").replace("бўшатилди", "бўшатиш")
-    return q
-
-def lex_search(query: str, limit: int = 10):
-    q = normalize_query(query)
-    if not q:
-        return []
-
-    url = f"https://lex.uz/uz/search/loc?query={quote_plus(q)}"
-    r = requests.get(url, headers=HEADERS, timeout=25)
-    r.raise_for_status()
+def lex_search(base, q):
+    url = base + quote_plus(q)
+    r = requests.get(url, headers=HEADERS, timeout=20)
     soup = BeautifulSoup(r.text, "html.parser")
-
-    results = []
-    for a in soup.select("a[href^='/uz/docs/'], a[href^='/ru/docs/']"):
-        href = a.get("href", "")
-        title = a.get_text(" ", strip=True)
-        if not title:
-            continue
-        full = "https://lex.uz" + href
-        if full not in {x["url"] for x in results}:
-            results.append({"title": title, "url": full})
-        if len(results) >= limit:
-            break
-    return results
+    res = []
+    for a in soup.select("a[href^='/uz/docs/'],a[href^='/ru/docs/']")[:10]:
+        res.append({
+            "title": a.get_text(" ", strip=True),
+            "url": "https://lex.uz" + a["href"]
+        })
+    return res
 
 @app.route("/", methods=["GET", "POST"])
 def home():
+    cat = request.args.get("cat", "mehnat")
     q = ""
-    results = None
+    results = []
+    searched = False
+
     if request.method == "POST":
         q = request.form.get("q", "")
-        results = lex_search(q, limit=10)
-    return render_template_string(HTML, q=q, results=results, sources=SOURCES)
+        searched = True
+        if q:
+            results = lex_search(CATEGORIES[cat]["lex"], q)
+
+    return render_template_string(
+        HTML,
+        categories=CATEGORIES,
+        cat=cat,
+        q=q,
+        results=results,
+        searched=searched
+    )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
