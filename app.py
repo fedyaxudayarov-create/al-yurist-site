@@ -1,542 +1,569 @@
+# app.py
+# -*- coding: utf-8 -*-
 import re
 import time
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
+
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import quote_plus
-from flask import Flask, request, render_template_string
+from flask import Flask, jsonify, request, render_template_string
 
 app = Flask(__name__)
-HEADERS = {"User-Agent": "Mozilla/5.0 (AL-Yurist)"}
 
-# Аниқ манбалар (doc_id) — шуниси вилоят қарорларини “кесади”
-CATEGORIES = {
+# ====== 1) Манбалар (lex.uz ҳужжатлари) ======
+SOURCES: Dict[str, Dict[str, str]] = {
     "mehnat": {
-        "title": "Меҳнат кодекси",
-        "doc_id": "-6257288",
-        "hint": "масалан: ишдан бўшатиш, меҳнат шартномаси, ишга қабул қилиш, интизомий жазо",
-    },
-    "mamuriy": {
-        "title": "Маъмурий жавобгарлик",
-        "doc_id": "-97664",
-        "hint": "масалан: маъмурий ҳуқуқбузарлик, жарима, маъмурий жавобгарлик",
+        "title": "Меҳнат кодекси (2022)",
+        "url": "https://lex.uz/ru/docs/-6257288",
     },
     "jinoyat": {
-        "title": "Жиноий жавобгарлик",
-        "doc_id": "-111453",
-        "hint": "масалан: жиноят таркиби, жазо, жавобгарлик",
+        "title": "Жиноят кодекси",
+        "url": "https://lex.uz/ru/docs/-111453",
     },
-    "konst": {
-        "title": "Конституция",
-        "doc_id": "-6445145",
-        "hint": "масалан: фуқаро ҳуқуқлари, давлат ҳокимияти, конституциявий норма",
+    "mamuriy": {
+        "title": "Маъмурий жавобгарлик тўғрисидаги кодекс",
+        "url": "https://lex.uz/uz/docs/97664",
     },
-    "davxizm": {
-        "title": "Давлат фуқаролик хизмати",
-        "doc_id": "-6145972",
-        "hint": "масалан: давлат хизматчиси, интизом, аттестация, лавозим",
+    "konstitutsiya": {
+        "title": "Конституция (2023)",
+        "url": "https://lex.uz/docs/-6445145?otherlang=1",
     },
+    "fuqarolik": {
+        "title": "Фуқаролик кодекси",
+        "url": "https://lex.uz/docs/-180552",
+    },
+    "dfx": {
+        "title": "«Давлат фуқаролик хизмати тўғрисида» Қонун",
+        "url": "https://lex.uz/ru/docs/-6145972",
+    },
+    # Умумий — бир нечта манбада қидиради (кодлар+асосийлар)
     "umumiy": {
-        "title": "Қонун-қоидалар (умумий)",
-        "doc_id": None,
-        "hint": "масалан: қарор, фармойиш, низом (умумий қидирув)",
+        "title": "Қонун-кодекслар (умумий)",
+        "url": "",
     },
 }
 
-# ===== Кирилл↔Лотин (содда, амалда ишлайдиган) =====
-# Етарли “амалий” конверсия: HR матнларига ҳам тўғри келади.
-LAT2CYR = [
-    ("g‘", "ғ"), ("g'", "ғ"), ("o‘", "ў"), ("o'", "ў"),
-    ("sh", "ш"), ("ch", "ч"), ("ng", "нг"),
-    ("ya", "я"), ("yo", "ё"), ("yu", "ю"), ("ye", "е"),
-    ("a", "а"), ("b", "б"), ("d", "д"), ("e", "е"), ("f", "ф"),
-    ("g", "г"), ("h", "ҳ"), ("i", "и"), ("j", "ж"), ("k", "к"),
-    ("l", "л"), ("m", "м"), ("n", "н"), ("o", "о"), ("p", "п"),
-    ("q", "қ"), ("r", "р"), ("s", "с"), ("t", "т"), ("u", "у"),
-    ("v", "в"), ("x", "х"), ("y", "й"), ("z", "з"),
-]
-CYR2LAT = [
-    ("ғ", "g'"), ("ў", "o'"), ("ш", "sh"), ("ч", "ch"), ("нг", "ng"),
-    ("я", "ya"), ("ё", "yo"), ("ю", "yu"), ("е", "e"),
-    ("а", "a"), ("б", "b"), ("д", "d"), ("ф", "f"), ("г", "g"),
-    ("ҳ", "h"), ("и", "i"), ("ж", "j"), ("к", "k"), ("л", "l"),
-    ("м", "m"), ("н", "n"), ("о", "o"), ("п", "p"), ("қ", "q"),
-    ("р", "r"), ("с", "s"), ("т", "t"), ("у", "u"), ("в", "v"),
-    ("х", "x"), ("й", "y"), ("з", "z"),
-]
+DEFAULT_ORDER = ["mehnat", "dfx", "mamuriy", "jinoyat", "konstitutsiya", "fuqarolik"]
 
-def to_cyr(s: str) -> str:
-    s2 = s
-    lower = s2.lower()
-    # ишончли: кичик ҳарфда айлантирамиз (HR учун етарли)
-    out = lower
-    for a, b in LAT2CYR:
-        out = out.replace(a, b)
-    return out
+# ====== 2) Кичик кэш (Render free учун) ======
+@dataclass
+class CachedDoc:
+    html: str
+    fetched_at: float
 
-def to_lat(s: str) -> str:
-    s2 = s
-    out = s2
-    for a, b in CYR2LAT:
-        out = out.replace(a, b)
-    return out
+DOC_CACHE: Dict[str, CachedDoc] = {}
+CACHE_TTL_SEC = 60 * 30  # 30 дақиқа
 
-def norm_space(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"\s+", " ", s)
-    return s
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (AL-Yurist demo; +https://example.local) AppleWebKit/537.36"
+}
 
-# ===== Lex helpers =====
-DOC_CACHE = {}  # doc_id -> {"ts":..., "html":..., "articles":[...]}
-CACHE_TTL = 6 * 60 * 60  # 6 соат
+STOPWORDS_UZ = set("""
+ва ёки ҳам аммо учун билан бўйича тўғрисида мазкур ушбу шу бу ана у улар сиз биз мен сен
+қилади қилиш қилинган этилади этилган бўлса бўлади керак шарт мумкин эмас
+ҳақида асосида бўлган бўлгани бўлганда қилинса қилинг
+""".split())
 
-def fetch_doc_html(doc_id: str) -> str:
-    """Кодекс матнини олиб келиб кэшлаймиз."""
+def fetch_html(url: str) -> str:
     now = time.time()
-    cached = DOC_CACHE.get(doc_id)
-    if cached and (now - cached["ts"] < CACHE_TTL):
-        return cached["html"]
+    cached = DOC_CACHE.get(url)
+    if cached and (now - cached.fetched_at) < CACHE_TTL_SEC:
+        return cached.html
 
-    url = f"https://lex.uz/uz/docs/{doc_id}"
     r = requests.get(url, headers=HEADERS, timeout=25)
     r.raise_for_status()
     html = r.text
-    DOC_CACHE[doc_id] = {"ts": now, "html": html, "articles": None}
+    DOC_CACHE[url] = CachedDoc(html=html, fetched_at=now)
     return html
 
-def parse_articles(doc_id: str):
-    """Кодекс саҳифасида 'Модда' блокларини ажратиб оламиз."""
-    now = time.time()
-    cached = DOC_CACHE.get(doc_id)
-    if cached and cached.get("articles") is not None and (now - cached["ts"] < CACHE_TTL):
-        return cached["articles"]
+def clean_text(s: str) -> str:
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
 
-    html = fetch_doc_html(doc_id)
+def extract_blocks_from_lex(html: str) -> List[Tuple[str, str]]:
+    """
+    Lex.uz ҳужжатидан блоклар чиқарамиз.
+    Мақсад: '###-modda' атрофида матнларни блок қилиб, қидиришда шу блокни қайтариш.
+    """
     soup = BeautifulSoup(html, "html.parser")
 
-    text = soup.get_text("\n", strip=True)
-    # “Модда 12.” каби жойларни тўплаймиз (хом усул, лекин ишлайди)
-    # Саҳифа структураси ўзгарса ҳам шу regex кўп ҳолатда ёрдам беради
-    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-    joined = "\n".join(lines)
+    # 1) Кўп ҳолатда асосий матн body ичида; script/style ни олиб ташлаймиз
+    for t in soup(["script", "style", "noscript"]):
+        t.decompose()
 
-    # Модда сарлавҳасини топиш (кирил/латин, русча 'Статья' ҳам бўлиши мумкин)
-    pattern = re.compile(r"(Модда\s+\d+\.?|Статья\s+\d+\.?)", re.IGNORECASE)
-    matches = list(pattern.finditer(joined))
+    text = soup.get_text("\n")
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text).strip()
 
-    articles = []
-    if matches:
-        for i, m in enumerate(matches):
-            start = m.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else min(len(joined), start + 2500)
-            block = joined[start:end].strip()
-            title = m.group(1)
-            # қисқа сарлавҳа
-            short = block.split("\n", 1)[0][:120]
-            articles.append({
-                "title": short if short else title,
-                "block": block[:2200],
-                "url": f"https://lex.uz/uz/docs/{doc_id}",
+    # 2) Моддаларни ажратиш: "123-modda" / "123-модда" турлари
+    # Кирилл/лотин аралаш келиши мумкин, шунинг учун иккаласига regex
+    pattern = re.compile(r"(?P<head>\b\d{1,4}\s*[-–]\s*(modda|модда)\b)", re.IGNORECASE)
+
+    matches = list(pattern.finditer(text))
+    if not matches:
+        # Агар модда топилмаса — бутун матнни 1 блок қиламиз
+        return [("Ҳужжат", text[:25000])]
+
+    blocks: List[Tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        head = clean_text(m.group("head"))
+        chunk = clean_text(text[start:end])
+        # Жуда катта бўлса кесамиз (демо учун)
+        if len(chunk) > 12000:
+            chunk = chunk[:12000] + " …"
+        blocks.append((head, chunk))
+    return blocks
+
+def find_matches_in_blocks(query: str, blocks: List[Tuple[str, str]], limit: int = 8) -> List[Dict]:
+    q = query.strip()
+    if not q:
+        return []
+
+    # “сўз”ларни қидириш: кирилл/лотин, катта-кичик фарқламасин
+    q_norm = q.lower()
+
+    results = []
+    for head, chunk in blocks:
+        if q_norm in chunk.lower():
+            # match атрофидан 250 символ preview
+            idx = chunk.lower().find(q_norm)
+            left = max(0, idx - 120)
+            right = min(len(chunk), idx + 120)
+            preview = chunk[left:right]
+            preview = preview.replace("\n", " ")
+            results.append({
+                "modda": head,
+                "preview": ("…" if left > 0 else "") + preview + ("…" if right < len(chunk) else ""),
+                "text": chunk
             })
+            if len(results) >= limit:
+                break
+    return results
 
-    if doc_id in DOC_CACHE:
-        DOC_CACHE[doc_id]["articles"] = articles
-        DOC_CACHE[doc_id]["ts"] = now
-    else:
-        DOC_CACHE[doc_id] = {"ts": now, "html": html, "articles": articles}
-    return articles
-
-def search_inside_doc(doc_id: str, query: str, limit: int = 8):
-    """Кодекснинг ўзида (модда блокларида) қидириш."""
-    q = norm_space(query).lower()
-    if not q:
-        return []
-
-    # икки ёзувни ҳам текширамиз: кирилл ва лотин
-    q_c = to_cyr(q)
-    q_l = to_lat(q)
-
-    articles = parse_articles(doc_id)
-    scored = []
-    for a in articles:
-        blob = a["block"].lower()
-        score = 0
-        if q in blob: score += 3
-        if q_c and q_c in blob: score += 2
-        if q_l and q_l in blob: score += 2
-        # калит сўзлар бўйича майда балл
-        for w in q.split():
-            if len(w) >= 4 and w in blob:
-                score += 1
-        if score > 0:
-            # қисқа snippet
-            idx = blob.find(q) if q in blob else (blob.find(q_c) if q_c in blob else blob.find(q_l))
-            if idx < 0: idx = 0
-            snippet = a["block"][max(0, idx - 120): idx + 240]
-            scored.append((score, a["title"], a["url"], snippet))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    out = []
-    for s, title, url, snip in scored[:limit]:
-        out.append({"title": title, "url": url, "snippet": snip})
-    return out
-
-def lex_general_search(query: str, limit: int = 10):
-    """Умумий lex қидирув (меню 'умумий' учун)."""
-    q = norm_space(query)
-    if not q:
-        return []
-    url = "https://lex.uz/uz/search/loc?query=" + quote_plus(q)
-    r = requests.get(url, headers=HEADERS, timeout=25)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    res = []
-    for a in soup.select("a[href^='/uz/docs/'], a[href^='/ru/docs/']"):
-        title = a.get_text(" ", strip=True)
-        href = a.get("href", "")
-        if title and href:
-            res.append({"title": title, "url": "https://lex.uz" + href})
-        if len(res) >= limit:
-            break
-    return res
-
-# ===== Матндан “асос” излаш (буйруқ/қарор) =====
-STOP = set("""
-ва ҳам ёки учун билан бўйича тўғрисида ҳақида асосида
-туғрисидаги қилиниши қилиш қилиб қилинган қилинса
-ҳаққидаги ҳамда шу бу у мазкур асоси асос
-""".split())
-
-def extract_keywords(text: str, max_words: int = 10):
-    t = (text or "").lower()
-    t = re.sub(r"[^a-zа-яёғқҳўʼ' \n\t-]+", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    words = [w for w in t.split() if len(w) >= 4 and w not in STOP]
-    # энг кўп такрорланган сўзлар
-    freq = {}
+def extract_keywords_from_text(text: str, max_keywords: int = 6) -> List[str]:
+    """
+    Буйруқ/қарор матнидан калит сўзларни оддий усулда чиқарамиз:
+    - 3+ ҳарфли сўзлар
+    - stopword эмас
+    - частота юқори
+    """
+    text = text.lower()
+    # кирилл + лотин ҳарфлар
+    words = re.findall(r"[a-zа-яёўқғҳ]{3,}", text, flags=re.IGNORECASE)
+    freq: Dict[str, int] = {}
     for w in words:
+        w = w.strip().lower()
+        if w in STOPWORDS_UZ:
+            continue
         freq[w] = freq.get(w, 0) + 1
-    top = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:max_words]
-    return [w for w, _ in top]
 
-def auto_category_from_text(text: str) -> str:
-    t = (text or "").lower()
-    if any(x in t for x in ["ишдан", "меҳнат", "ходим", "интизом", "шартнома", "таътил", "ишга"]):
-        return "mehnat"
-    if any(x in t for x in ["маъмурий", "жарима", "баённома", "ҳуқуқбузарлик"]):
-        return "mamuriy"
-    if any(x in t for x in ["жиноят", "жиноий", "қамоқ", "жазо"]):
-        return "jinoyat"
-    if any(x in t for x in ["конституция", "ҳуқуқ", "эркинлик", "давлат ҳокимияти"]):
-        return "konst"
-    if any(x in t for x in ["давлат хизмат", "фуқаролик хизмати", "аттестация"]):
-        return "davxizm"
-    return "umumiy"
+    # энг кўп учраганлар
+    ranked = sorted(freq.items(), key=lambda x: (-x[1], -len(x[0])))
+    return [w for w, _ in ranked[:max_keywords]]
 
-HTML = """
+def search_one_source(cat: str, query: str) -> Dict:
+    src = SOURCES.get(cat)
+    if not src:
+        return {"category": cat, "title": cat, "items": [], "error": "unknown category"}
+
+    if cat == "umumiy":
+        # умумий: бир нечта базада кетма-кет излаймиз
+        merged = []
+        for c in DEFAULT_ORDER:
+            one = search_one_source(c, query)
+            if one.get("items"):
+                merged.append(one)
+        return {"category": "umumiy", "title": SOURCES["umumiy"]["title"], "items": merged, "error": None}
+
+    try:
+        html = fetch_html(src["url"])
+        blocks = extract_blocks_from_lex(html)
+        items = find_matches_in_blocks(query, blocks, limit=10)
+        return {
+            "category": cat,
+            "title": src["title"],
+            "url": src["url"],
+            "items": items,
+            "error": None
+        }
+    except Exception as e:
+        return {
+            "category": cat,
+            "title": src["title"],
+            "url": src.get("url", ""),
+            "items": [],
+            "error": str(e)
+        }
+
+# ====== 3) UI (қора интерфейс + меню + Enter submit + Кирилл/Лотин) ======
+PAGE = r"""
 <!doctype html>
 <html lang="uz">
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>AL Юрист</title>
-<style>
-:root{
-  --bg:#0b1220;--card:#121b2f;--line:#253358;
-  --text:#eaf0ff;--muted:#a9b6d6;--btn:#3b82f6;--in:#0c1428;
-}
-*{box-sizing:border-box}
-body{margin:0;font-family:system-ui,Segoe UI,Arial;background:var(--bg);color:var(--text)}
-.wrap{max-width:1100px;margin:auto;padding:18px 12px 40px}
-.top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
-h1{margin:0;font-size:22px}
-.small{color:var(--muted);font-size:12px}
-.menu{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
-.menu a{border:1px solid var(--line);background:var(--card);color:var(--text);text-decoration:none;
-  padding:8px 10px;border-radius:12px;font-size:13px}
-.menu a.active{background:var(--btn);border-color:var(--btn)}
-.grid{display:grid;grid-template-columns:1fr;gap:12px}
-.card{border:1px solid var(--line);background:var(--card);border-radius:16px;padding:14px}
-label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}
-textarea{width:100%;min-height:110px;background:var(--in);border:1px solid var(--line);
-  border-radius:12px;padding:12px;color:var(--text);outline:none;resize:vertical}
-textarea:focus{border-color:var(--btn)}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
-.btn{border:none;background:var(--btn);color:#fff;padding:10px 14px;border-radius:12px;font-weight:800;cursor:pointer}
-.btn2{border:1px solid var(--line);background:var(--in);color:var(--text);padding:10px 12px;border-radius:12px;cursor:pointer}
-.btn2:hover{border-color:var(--btn)}
-.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
-.chip{border:1px solid var(--line);background:var(--in);color:var(--text);padding:8px 10px;border-radius:999px;
-  cursor:pointer;font-size:13px}
-.chip:hover{border-color:var(--btn)}
-.res{margin-top:12px}
-.item{background:var(--in);border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0}
-.item a{color:#93c5fd;text-decoration:none}
-.item a:hover{text-decoration:underline}
-.snip{margin-top:8px;color:var(--muted);font-size:12px;white-space:pre-wrap}
-.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-.tab{border:1px solid var(--line);background:var(--in);color:var(--text);padding:8px 10px;border-radius:12px;cursor:pointer}
-.tab.active{background:var(--btn);border-color:var(--btn)}
-.hidden{display:none}
-.warn{border:1px dashed var(--line);background:var(--in);border-radius:14px;padding:12px;color:var(--muted);font-size:12px}
-</style>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>AL Юрист</title>
+  <style>
+    :root{
+      --bg:#070b16; --panel:#0d1426; --panel2:#0b1222; --txt:#e8eefc; --muted:#a9b6d6;
+      --line:#1e2a47; --accent:#4da3ff; --good:#43d18a; --bad:#ff5c6a;
+      --shadow: 0 14px 40px rgba(0,0,0,.35);
+      --radius:18px;
+    }
+    body{margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:radial-gradient(1200px 800px at 15% 10%, #0b1a37 0%, var(--bg) 45%, #050713 100%); color:var(--txt);}
+    .wrap{max-width:1100px; margin:0 auto; padding:28px 16px 60px;}
+    .top{display:flex; gap:14px; align-items:center; justify-content:space-between; margin-bottom:18px;}
+    .brand{display:flex; flex-direction:column; gap:4px;}
+    h1{margin:0; font-size:28px; letter-spacing:.2px;}
+    .sub{color:var(--muted); font-size:13px;}
+    .pill{background:rgba(77,163,255,.12); color:var(--txt); border:1px solid rgba(77,163,255,.25); padding:8px 10px; border-radius:999px; font-size:12px}
+    .grid{display:grid; grid-template-columns: 1.1fr .9fr; gap:16px;}
+    @media(max-width:980px){ .grid{grid-template-columns:1fr;} }
+
+    .card{background:linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015)); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); }
+    .card .hd{padding:14px 16px; border-bottom:1px solid rgba(30,42,71,.7); display:flex; align-items:center; justify-content:space-between;}
+    .card .bd{padding:16px;}
+    .tabs{display:flex; flex-wrap:wrap; gap:8px;}
+    .tab{
+      padding:8px 12px; border-radius:999px; border:1px solid var(--line); background:rgba(0,0,0,.15);
+      color:var(--txt); cursor:pointer; font-size:13px;
+    }
+    .tab.active{background:rgba(77,163,255,.15); border-color:rgba(77,163,255,.35);}
+    .modes{display:flex; gap:8px; margin-top:10px;}
+    .mode{padding:7px 10px; border-radius:10px; border:1px solid var(--line); background:rgba(0,0,0,.12); cursor:pointer; color:var(--muted); font-size:13px;}
+    .mode.active{color:var(--txt); border-color:rgba(77,163,255,.35); background:rgba(77,163,255,.12);}
+
+    textarea{width:100%; min-height:140px; resize:vertical; border-radius:14px; border:1px solid var(--line); background:rgba(0,0,0,.25); color:var(--txt); padding:12px; font-size:14px; outline:none;}
+    textarea:focus{border-color:rgba(77,163,255,.55); box-shadow:0 0 0 3px rgba(77,163,255,.12);}
+    .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:12px;}
+    button{
+      border:0; cursor:pointer; padding:10px 14px; border-radius:12px; background:linear-gradient(180deg, rgba(77,163,255,.95), rgba(77,163,255,.75));
+      color:#061027; font-weight:700;
+    }
+    .ghost{background:rgba(255,255,255,.06); color:var(--txt); border:1px solid var(--line); font-weight:600;}
+    .hint{color:var(--muted); font-size:12px;}
+    .chips{display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;}
+    .chip{background:rgba(255,255,255,.06); border:1px solid var(--line); color:var(--txt); padding:6px 10px; border-radius:999px; cursor:pointer; font-size:12px;}
+
+    .results{display:flex; flex-direction:column; gap:10px;}
+    .item{
+      background:rgba(0,0,0,.18); border:1px solid rgba(30,42,71,.8); border-radius:14px; padding:12px 12px;
+    }
+    .item .t{display:flex; justify-content:space-between; gap:10px; align-items:flex-start;}
+    .item .modda{font-weight:800;}
+    .item a{color:var(--accent); text-decoration:none}
+    .item a:hover{text-decoration:underline}
+    .item .p{color:var(--muted); font-size:13px; margin-top:6px; line-height:1.35;}
+    .small{font-size:12px; color:var(--muted);}
+    .ok{color:var(--good); font-weight:700}
+    .err{color:var(--bad); font-weight:700}
+    .footerNote{margin-top:14px; font-size:12px; color:var(--muted);}
+  </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="top">
-    <div>
-      <h1>AL Юрист</h1>
-      <div class="small">Кодекс/қонун ичида “модда”га яқин жойларни топиб беради (lex.uz очиқ манба)</div>
-    </div>
-    <div class="small">Сичқонча шарт эмас: <b>Enter</b> босинг ✅</div>
-  </div>
-
-  <div class="menu">
-    {% for k,v in categories.items() %}
-      <a href="/?cat={{k}}&mode={{mode}}" class="{% if cat==k %}active{% endif %}">{{v.title}}</a>
-    {% endfor %}
-  </div>
-
-  <div class="card">
-    <div class="tabs">
-      <button class="tab {% if mode=='q' %}active{% endif %}" onclick="goMode('q')">Қидирув (калит сўз)</button>
-      <button class="tab {% if mode=='doc' %}active{% endif %}" onclick="goMode('doc')">Буйруқ/қарор матни (асос топиш)</button>
+  <div class="wrap">
+    <div class="top">
+      <div class="brand">
+        <h1>AL Юрист</h1>
+        <div class="sub">Кодекс/қонун ичида “модда”ни қидиради (lex.uz очиқ манба) — HR буйруқ/қарор учун демо</div>
+      </div>
+      <div class="pill" id="enterHint">Enter босинг ✅</div>
     </div>
 
-    <div id="modeQ" class="{% if mode!='q' %}hidden{% endif %}">
-      <form method="post" id="formQ">
-        <input type="hidden" name="mode" value="q"/>
-        <label>Калит сўз (қисқа ёзинг):</label>
-        <textarea name="q" id="qBox" placeholder="{{ categories[cat].hint }}">{{ q }}</textarea>
-        <div class="row">
-          <button class="btn" type="submit">Қидириш</button>
-          <button class="btn2" type="button" onclick="toggleScript('qBox')">Кирилл ↔ Лотин</button>
-          <div class="small">Масалан: <b>ишдан бўшатиш</b>, <b>меҳнат шартномаси</b>, <b>интизомий жазо</b></div>
+    <div class="grid">
+      <div class="card">
+        <div class="hd">
+          <div><b>Қидирув панели</b> <span class="small">— категория танланг</span></div>
+          <div class="tabs" id="tabs"></div>
         </div>
-        <div class="chips">
-          <span class="chip" onclick="quick('ишдан бўшатиш')">Ишдан бўшатиш</span>
-          <span class="chip" onclick="quick('ишга қабул қилиш')">Ишга қабул қилиш</span>
-          <span class="chip" onclick="quick('меҳнат шартномаси')">Меҳнат шартномаси</span>
-          <span class="chip" onclick="quick('интизомий жазо')">Интизомий жазо</span>
-          <span class="chip" onclick="quick('таътил')">Таътил</span>
-        </div>
-      </form>
-    </div>
+        <div class="bd">
+          <div class="modes">
+            <div class="mode active" data-mode="keyword">Қидирув (калит сўз)</div>
+            <div class="mode" data-mode="doc">Буйруқ/қарор матни (асос топиш)</div>
+          </div>
 
-    <div id="modeDoc" class="{% if mode!='doc' %}hidden{% endif %}">
-      <form method="post" id="formDoc">
-        <input type="hidden" name="mode" value="doc"/>
-        <label>Буйруқ/қарор матнини шу ерга ташланг (сайт калит ибораларни ўзи ажратади):</label>
-        <textarea name="doc" id="docBox" placeholder="Буйруқ (лойиҳа) матнини қўйинг...">{{ doc }}</textarea>
-        <div class="row">
-          <button class="btn" type="submit">Асосини топиш</button>
-          <button class="btn2" type="button" onclick="toggleScript('docBox')">Кирилл ↔ Лотин</button>
-          <div class="small">Кең матн ташланса ҳам бўлади. Натижа “модда” блокларига яқин жойлар билан чиқади.</div>
-        </div>
-      </form>
-      {% if extracted %}
-        <div class="warn" style="margin-top:10px">
-          Ажратилган калит сўзлар: <b>{{ extracted|join(', ') }}</b><br/>
-          Авто танланган йўналиш: <b>{{ categories[autocat].title }}</b> (хоҳласангиз юқори менюдан ўзингиз алмаштирасиз)
-        </div>
-      {% endif %}
-    </div>
+          <div style="margin-top:12px;">
+            <div class="small" id="labelText">Калит сўз (қисқа ёзинг):</div>
+            <textarea id="q" placeholder="Масалан: ишдан бўшатиш, меҳнат шартномаси, интизомий жазо..."></textarea>
 
-    <div class="res">
-      {% if results is not none %}
-        {% if results %}
-          {% for r in results %}
-            <div class="item">
-              <a href="{{ r.url }}" target="_blank">{{ r.title }}</a>
-              {% if r.snippet %}
-                <div class="snip">{{ r.snippet }}</div>
-              {% endif %}
-              <div class="small">{{ r.url }}</div>
+            <div class="row">
+              <button id="btn">Қидириш</button>
+              <button class="ghost" id="toggle">Кирилл ⇄ Лотин</button>
+              <span class="hint">Shift+Enter — янги қатор. Enter — қидиради.</span>
             </div>
-          {% endfor %}
-        {% else %}
-          <div class="warn">Натижа топилмади. Калит сўзни қисқартириб ёзинг (масалан: <b>бўшатиш</b>).</div>
-        {% endif %}
-      {% endif %}
-    </div>
 
-    <div class="warn" style="margin-top:10px">
-      Эслатма: бу демо. Натижа “асос” топишга ёрдам беради, лекин расмий қарор/буйруқ олдидан матнни ўзингиз ҳам текшириб чиқинг.
+            <div class="chips" id="chips"></div>
+            <div class="footerNote">
+              Эслатма: бу демо. Натижа “асос” топишга ёрдам беради, расмий қарор/буйруқ олдидан матнни текшириб чиқинг.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd">
+          <div><b>Натижа</b></div>
+          <div class="small" id="status">—</div>
+        </div>
+        <div class="bd">
+          <div class="results" id="results"></div>
+        </div>
+      </div>
     </div>
   </div>
-</div>
 
 <script>
-function goMode(m){
-  const url = new URL(window.location.href);
-  url.searchParams.set('mode', m);
-  window.location.href = url.toString();
-}
-function quick(t){
-  const box = document.getElementById('qBox');
-  box.value = t;
-  box.focus();
-}
-function toggleScript(id){
-  const box = document.getElementById(id);
-  const s = box.value || "";
-  // оддий қоида: агар кирилл кўп бўлса -> лотинга, бўлмаса -> кириллга
-  const cyr = (s.match(/[А-Яа-яЁёҒғҚқҲҳЎў]/g)||[]).length;
-  if(cyr > 2){
-    box.value = cyr2lat(s);
-  }else{
-    box.value = lat2cyr(s);
+  const SOURCES = {{ sources_json | safe }};
+  const DEFAULT_ORDER = {{ default_order | safe }};
+
+  let currentCat = "mehnat";
+  let mode = "keyword";
+  let isCyr = true;
+
+  const tabsEl = document.getElementById("tabs");
+  const chipsEl = document.getElementById("chips");
+  const qEl = document.getElementById("q");
+  const resultsEl = document.getElementById("results");
+  const statusEl = document.getElementById("status");
+  const labelEl = document.getElementById("labelText");
+
+  function buildTabs(){
+    tabsEl.innerHTML = "";
+    const items = [
+      ["mehnat","Меҳнат кодекси"],
+      ["umumiy","Қонун коддалар (умумий)"],
+      ["mamuriy","Маъмурий жавобгарлик"],
+      ["jinoyat","Жиноий жавобгарлик"],
+      ["konstitutsiya","Конституция"],
+      ["dfx","Давлат фуқаролик хизмати"],
+      ["fuqarolik","Фуқаролик кодекси"],
+    ];
+    items.forEach(([key,label])=>{
+      const b=document.createElement("div");
+      b.className="tab"+(key===currentCat?" active":"");
+      b.textContent=label;
+      b.onclick=()=>{ currentCat=key; buildTabs(); setChips(); runSearch(); };
+      tabsEl.appendChild(b);
+    });
   }
-}
-function lat2cyr(s){
-  let t = s.toLowerCase();
-  const reps = [
-    ["g‘","ғ"],["g'","ғ"],["o‘","ў"],["o'","ў"],
-    ["sh","ш"],["ch","ч"],["ng","нг"],
-    ["ya","я"],["yo","ё"],["yu","ю"],["ye","е"],
-    ["a","а"],["b","б"],["d","д"],["e","е"],["f","ф"],
-    ["g","г"],["h","ҳ"],["i","и"],["j","ж"],["k","к"],
-    ["l","л"],["m","м"],["n","н"],["o","о"],["p","п"],
-    ["q","қ"],["r","р"],["s","с"],["t","т"],["u","у"],
+
+  function setMode(newMode){
+    mode = newMode;
+    document.querySelectorAll(".mode").forEach(m=>{
+      m.classList.toggle("active", m.dataset.mode===mode);
+    });
+    labelEl.textContent = mode==="keyword" ? "Калит сўз (қисқа ёзинг):" : "Буйруқ/қарор матнини тўлиқ ташланг:";
+    qEl.placeholder = mode==="keyword"
+      ? "Масалан: ишдан бўшатиш, меҳнат шартномаси, интизомий жазо..."
+      : "Бу ерга буйруқ/қарор матнини қўйинг. Система калит сўзларни ўзи топиб, асослардан моддаларни чиқаради.";
+    setChips();
+  }
+
+  function setChips(){
+    chipsEl.innerHTML = "";
+    const presets = {
+      mehnat: ["ишдан бўшатиш","ишга қабул қилиш","меҳнат шартномаси","интизомий жазо","таътил","иш вақти"],
+      mamuriy: ["маъмурий жавобгарлик","жарима","баённома","маъмурий ҳибс"],
+      jinoyat: ["жиноят таркиби","жазо","жавобгарлик","квалификация"],
+      konstitutsiya: ["ҳуқуқ ва эркинлик","давлат ҳокимияти","фуқаро","референдум"],
+      dfx: ["танлов","давлат хизматчиси","28-модда","интизом"],
+      fuqarolik: ["шартнома","даъво","мулк","мажбурият"],
+      umumiy: ["ишдан бўшатиш","шартнома","жарима","жавобгарлик"]
+    };
+    (presets[currentCat]||presets["umumiy"]).forEach(t=>{
+      const c=document.createElement("div");
+      c.className="chip";
+      c.textContent=t;
+      c.onclick=()=>{ qEl.value=t; runSearch(); };
+      chipsEl.appendChild(c);
+    });
+  }
+
+  function escapeHtml(s){
+    return (s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+  }
+
+  async function runSearch(){
+    const q = qEl.value.trim();
+    if(!q){ resultsEl.innerHTML=""; statusEl.textContent="Калит сўз киритинг"; return; }
+    statusEl.textContent="Қидирилмоқда...";
+    resultsEl.innerHTML="";
+
+    const res = await fetch("/api/search", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ cat: currentCat, q, mode })
+    });
+    const data = await res.json();
+
+    if(data.error){
+      statusEl.innerHTML = '<span class="err">Хато:</span> '+escapeHtml(data.error);
+      return;
+    }
+
+    // Умумий режимда бир нечта категория қайтиши мумкин
+    if(data.category==="umumiy"){
+      let total = 0;
+      data.items.forEach(group=> total += (group.items||[]).length );
+      statusEl.innerHTML = `<span class="ok">Топилди:</span> ${total} та натижа`;
+      data.items.forEach(group=>{
+        const h = document.createElement("div");
+        h.className="small";
+        h.style.margin="10px 0 6px";
+        h.innerHTML = `<b>${escapeHtml(group.title)}</b> — <a href="${group.url}" target="_blank" rel="noopener">lex.uz</a>`;
+        resultsEl.appendChild(h);
+        (group.items||[]).forEach(it=> addItem(group, it));
+      });
+      if(total===0){
+        resultsEl.innerHTML = '<div class="small">Натижа топилмади. Калит сўзни бошқача ёзинг (масалан: “бўшатиш”, “шартнома”, “интизом”).</div>';
+      }
+      return;
+    }
+
+    statusEl.innerHTML = `<span class="ok">Топилди:</span> ${(data.items||[]).length} та натижа`;
+    (data.items||[]).forEach(it=> addItem(data, it));
+    if((data.items||[]).length===0){
+      resultsEl.innerHTML = '<div class="small">Натижа топилмади. Калит сўзни қисқартиринг ёки бошқача синоним қилинг.</div>';
+    }
+  }
+
+  function addItem(group, it){
+    const d=document.createElement("div");
+    d.className="item";
+    d.innerHTML = `
+      <div class="t">
+        <div class="modda">${escapeHtml(it.modda || "")}</div>
+        <div class="small"><a href="${group.url}" target="_blank" rel="noopener">Манба: lex.uz</a></div>
+      </div>
+      <div class="p">${escapeHtml(it.preview || "")}</div>
+    `;
+    resultsEl.appendChild(d);
+  }
+
+  // Кирилл ⇄ Лотин (оддий транслит)
+  const map = [
+    ["sh","ш"],["ch","ч"],["ng","нг"],["yo","ё"],["yu","ю"],["ya","я"],["o'","ў"],["g'","ғ"],
+    ["a","а"],["b","б"],["d","д"],["e","е"],["f","ф"],["g","г"],["h","ҳ"],["i","и"],["j","ж"],["k","к"],
+    ["l","л"],["m","м"],["n","н"],["o","о"],["p","п"],["q","қ"],["r","р"],["s","с"],["t","т"],["u","у"],
     ["v","в"],["x","х"],["y","й"],["z","з"]
   ];
-  for(const [a,b] of reps){ t = t.split(a).join(b); }
-  return t;
-}
-function cyr2lat(s){
-  let t = s;
-  const reps = [
-    ["нг","ng"],["ғ","g'"],["ў","o'"],["ш","sh"],["ч","ch"],
-    ["я","ya"],["ё","yo"],["ю","yu"],["е","e"],
-    ["а","a"],["б","b"],["д","d"],["ф","f"],["г","g"],
-    ["ҳ","h"],["и","i"],["ж","j"],["к","k"],["л","l"],
-    ["м","m"],["н","n"],["о","o"],["п","p"],["қ","q"],
-    ["р","r"],["с","s"],["т","t"],["у","u"],["в","v"],
-    ["х","x"],["й","y"],["з","z"]
-  ];
-  for(const [a,b] of reps){ t = t.split(a).join(b); }
-  return t;
-}
 
-// Enter -> submit (Shift+Enter янги қатор)
-document.addEventListener('keydown', function(e){
-  const active = document.activeElement;
-  if(!active) return;
-  if(active.id === 'qBox' && e.key === 'Enter' && !e.shiftKey){
-    e.preventDefault();
-    document.getElementById('formQ').submit();
+  function toCyr(text){
+    let s=text;
+    // аввал махсус икки ҳарфлилар
+    const pairs = [["g'","ғ"],["o'","ў"],["sh","ш"],["ch","ч"],["ng","нг"],["yo","ё"],["yu","ю"],["ya","я"]];
+    pairs.forEach(([a,b])=>{
+      s = s.replaceAll(a.toLowerCase(), b).replaceAll(a.toUpperCase(), b.toUpperCase());
+    });
+    // қолган ҳарфлар
+    map.forEach(([a,b])=>{
+      s = s.replaceAll(a, b);
+      s = s.replaceAll(a.toUpperCase(), b.toUpperCase());
+    });
+    return s;
   }
-  if(active.id === 'docBox' && e.key === 'Enter' && e.ctrlKey){
-    e.preventDefault();
-    document.getElementById('formDoc').submit();
+
+  function toLat(text){
+    // минимал қайтариш (демо): кирилл -> лотин
+    const back = [
+      ["ғ","g'"],["ў","o'"],["ш","sh"],["ч","ch"],["нг","ng"],["ё","yo"],["ю","yu"],["я","ya"],
+      ["ҳ","h"],["қ","q"],["х","x"],["ж","j"],
+      ["а","a"],["б","b"],["д","d"],["е","e"],["ф","f"],["г","g"],["и","i"],["к","k"],["л","l"],["м","m"],
+      ["н","n"],["о","o"],["п","p"],["р","r"],["с","s"],["т","t"],["у","u"],["в","v"],["й","y"],["з","z"]
+    ];
+    let s=text;
+    back.forEach(([c,l])=>{
+      s = s.replaceAll(c, l);
+      s = s.replaceAll(c.toUpperCase(), l.charAt(0).toUpperCase()+l.slice(1));
+    });
+    return s;
   }
-});
+
+  document.getElementById("btn").onclick = runSearch;
+  document.getElementById("toggle").onclick = ()=>{
+    const v = qEl.value;
+    qEl.value = isCyr ? toLat(v) : toCyr(v);
+    isCyr = !isCyr;
+  };
+
+  // Enter босилса қидиради (Shift+Enter бўлса янги қатор)
+  qEl.addEventListener("keydown", (e)=>{
+    if(e.key==="Enter" && !e.shiftKey){
+      e.preventDefault();
+      runSearch();
+    }
+  });
+
+  // Mode тугмалари
+  document.querySelectorAll(".mode").forEach(m=>{
+    m.onclick = ()=> setMode(m.dataset.mode);
+  });
+
+  // init
+  buildTabs();
+  setChips();
 </script>
 </body>
 </html>
 """
 
-def search_results(cat_key: str, query: str):
-    """Менюга қараб: кодекс ичида ёки умумий қидирув."""
-    cat = CATEGORIES.get(cat_key, CATEGORIES["mehnat"])
-    q = norm_space(query)
-    if not q:
-        return []
-
-    # кодекс ичида “модда” блокларида қидириш
-    if cat["doc_id"]:
-        return search_inside_doc(cat["doc_id"], q, limit=8)
-
-    # умумий қидирув
-    g = lex_general_search(q, limit=10)
-    # snippet йўқ — бир хил формат учун
-    return [{"title": x["title"], "url": x["url"], "snippet": ""} for x in g]
-
-@app.route("/", methods=["GET", "POST"])
-def home():
-    cat = request.args.get("cat", "mehnat")
-    mode = request.args.get("mode", "q")  # q or doc
-
-    q = ""
-    doc = ""
-    results = None
-    extracted = []
-    autocat = cat
-
-    if request.method == "POST":
-        mode = request.form.get("mode", mode)
-
-        if mode == "q":
-            q = request.form.get("q", "")
-            results = search_results(cat, q)
-
-        elif mode == "doc":
-            doc = request.form.get("doc", "")
-            extracted = extract_keywords(doc, max_words=10)
-            autocat = auto_category_from_text(doc)
-
-            # агар менюда кодекс танланган бўлса шуни қолдирамиз, акс ҳолда авто-категория
-            use_cat = cat if cat in CATEGORIES else autocat
-            if use_cat == "umumiy":
-                use_cat = autocat
-
-            # матндан чиқарилган калит сўзлардан бир нечта сўров қиламиз
-            # биринчи навбатда 2-3 та энг кучлиси билан
-            queries = extracted[:4] if extracted else [doc[:60]]
-            merged = []
-            seen = set()
-            for qq in queries:
-                for r in search_results(use_cat, qq):
-                    key = (r["title"], r["url"])
-                    if key not in seen:
-                        seen.add(key)
-                        merged.append(r)
-                if len(merged) >= 10:
-                    break
-            results = merged[:10]
-
+@app.get("/")
+def index():
     return render_template_string(
-        HTML,
-        categories=CATEGORIES,
-        cat=cat if cat in CATEGORIES else "mehnat",
-        mode=mode,
-        q=q,
-        doc=doc,
-        results=results,
-        extracted=extracted,
-        autocat=autocat if autocat in CATEGORIES else "mehnat",
+        PAGE,
+        sources_json=SOURCES,
+        default_order=DEFAULT_ORDER
     )
 
-# ===== Матндан калит сўз чиқариш (юқорида ишлатилди) =====
-STOP = set("""
-ва ҳам ёки учун билан бўйича тўғрисида ҳақида асосида
-туғрисидаги қилиниши қилиш қилиб қилинган қилинса
-ҳаққидаги ҳамда шу бу у мазкур асоси асос
-""".split())
+@app.post("/api/search")
+def api_search():
+    data = request.get_json(force=True) or {}
+    cat = (data.get("cat") or "mehnat").strip()
+    q = (data.get("q") or "").strip()
+    mode = (data.get("mode") or "keyword").strip()
 
-def extract_keywords(text: str, max_words: int = 10):
-    t = (text or "").lower()
-    t = re.sub(r"[^a-zа-яёғқҳўʼ' \n\t-]+", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    words = [w for w in t.split() if len(w) >= 4 and w not in STOP]
-    freq = {}
-    for w in words:
-        freq[w] = freq.get(w, 0) + 1
-    top = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:max_words]
-    return [w for w, _ in top]
+    if not q:
+        return jsonify({"error": "empty query"}), 400
 
-def auto_category_from_text(text: str) -> str:
-    t = (text or "").lower()
-    if any(x in t for x in ["меҳнат", "ходим", "ишга", "ишдан", "шартнома", "интизом", "таътил"]):
-        return "mehnat"
-    if any(x in t for x in ["маъмурий", "жарима", "баённома", "ҳуқуқбузарлик"]):
-        return "mamuriy"
-    if any(x in t for x in ["жиноят", "жиноий", "жазо", "айб"]):
-        return "jinoyat"
-    if any(x in t for x in ["конституция", "ҳуқуқ", "эркинлик", "давлат ҳокимияти"]):
-        return "konst"
-    if any(x in t for x in ["давлат хизмат", "фуқаролик хизмати", "аттестация", "лавозим"]):
-        return "davxizm"
-    return "umumiy"
+    # 1) Агар “Буйруқ/қарор матни” режими бўлса — калит сўзларни ўзи топади
+    if mode == "doc":
+        keywords = extract_keywords_from_text(q, max_keywords=6)
+        if not keywords:
+            return jsonify({"error": "Матндан калит сўз чиқмади. Қисқароқ ва аниқ сўзлар билан қайта урининг."})
+
+        # Биринчи калит сўз билан қидириб, натижа бўлмаса кейингига ўтади
+        agg = []
+        for kw in keywords:
+            r = search_one_source(cat, kw)
+            # Умумий бўлса — структураси бошқача
+            if r.get("category") == "umumiy":
+                # агар бирорта натижа чиқса — шуни қайтарамиз
+                has_any = any((g.get("items") for g in r.get("items", [])))
+                if has_any:
+                    r["used_keywords"] = keywords
+                    return jsonify(r)
+            else:
+                if r.get("items"):
+                    r["used_keywords"] = keywords
+                    return jsonify(r)
+            agg.append({"kw": kw, "found": 0})
+
+        # Ҳеч нарса топилмади
+        return jsonify({
+            "category": cat,
+            "title": SOURCES.get(cat, {}).get("title", cat),
+            "items": [],
+            "used_keywords": keywords,
+            "error": None
+        })
+
+    # 2) Оддий калит сўз режими
+    result = search_one_source(cat, q)
+    return jsonify(result)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    # локал ишлатиш учун
+    app.run(host="0.0.0.0", port=5000, debug=True)
