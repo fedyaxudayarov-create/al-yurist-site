@@ -1,4 +1,6 @@
-flask
-requests
-beautifulsoup4
-gunicorn
+flask==3.1.0
+gunicorn==21.2.0
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.3.0
+rapidfuzz==3.9.7
