@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AL Юрист</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <div>
+        <h1>AL Юрист</h1>
+        <p class="sub">Кодекс/қонун ичида “модда”ни қидиради (lex.uz очиқ манба) — HR буйруқ/қарор учун демо</p>
+      </div>
+      <div class="pill">Enter босинг ✅</div>
+    </header>
+
+    <nav class="menu">
+      {% for c in categories %}
+        <a class="chip {% if c.key==cat %}active{% endif %}" href="/?cat={{c.key}}&mode={{mode}}">{{c.title}}</a>
+      {% endfor %}
+    </nav>
+
+    <section class="card">
+      <div class="tabs">
+        <button class="tab {% if mode=='q' %}active{% endif %}" data-mode="q">Қидирув (калит сўз)</button>
+        <button class="tab {% if mode=='doc' %}active{% endif %}" data-mode="doc">Буйруқ/қарор матни (асос топиш)</button>
+      </div>
+
+      <label class="lbl" id="lbl">Матн киритинг:</label>
+      <textarea id="txt" placeholder="Масалан: ишдан бўшатиш, интизомий жазо, меҳнат шартномаси..."></textarea>
+
+      <div class="row">
+        <button id="btn" class="btn">Қидириш</button>
+        <button id="tr" class="btn ghost">Кирилл ⇄ Лотин</button>
+        <span id="hint" class="hint"></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="title-row">
+        <h2>Натижа</h2>
+        <span id="stat" class="stat"></span>
+      </div>
+      <div id="results"></div>
+    </section>
+
+    <footer class="foot">
+      Эслатма: бу демо. Натижа “асос” топишга ёрдам беради, расмий қарор/буйруқ олдин матнини албатта текширинг.
+    </footer>
+  </div>
+
+<script>
+  const cat = "{{cat}}";
+  let mode = "{{mode}}";
+  const txt = document.getElementById("txt");
+  const btn = document.getElementById("btn");
+  const tr = document.getElementById("tr");
+  const results = document.getElementById("results");
+  const stat = document.getElementById("stat");
+  const hint = document.getElementById("hint");
+  const lbl = document.getElementById("lbl");
+
+  document.querySelectorAll(".tab").forEach(b=>{
+    b.addEventListener("click", ()=>{
+      mode = b.dataset.mode;
+      const url = new URL(location.href);
+      url.searchParams.set("mode", mode);
+      location.href = url.toString();
+    });
+  });
+
+  function setUI(){
+    if(mode==="doc"){
+      lbl.textContent = "Буйруқ/қарор матнини тўлиқ ташланг:";
+      txt.placeholder = "Буйруқ матнини тўлиқ қўйинг. Биз ундан калит сўз ажратиб, кодексдан модда қидирамиз...";
+    } else {
+      lbl.textContent = "Калит сўз (қисқа ёзинг):";
+      txt.placeholder = "Масалан: ишдан бўшатиш, таътил, интизомий жазо, жавобгарлик...";
+    }
+    hint.textContent = "Shift+Enter — янги қатор. Enter — қидиради.";
+  }
+  setUI();
+
+  // Enter босилса қидириш
+  txt.addEventListener("keydown", (e)=>{
+    if(e.key==="Enter" && !e.shiftKey){
+      e.preventDefault();
+      runSearch();
+    }
+  });
+  btn.addEventListener("click", runSearch);
+
+  function kirilToLatin(s){
+    // жуда содда (керак бўлса кейин яхшилаймиз)
+    const map = {
+      "а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"yo","ж":"j","з":"z","и":"i","й":"y","к":"k","л":"l","м":"m","н":"n",
+      "о":"o","п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"x","ц":"ts","ч":"ch","ш":"sh","щ":"sh","ъ":"","ы":"y","ь":"",
+      "э":"e","ю":"yu","я":"ya","қ":"q","ғ":"g‘","ҳ":"h","ў":"o‘",
+    };
+    return s.replace(/[А-Яа-яЁёҚқҒғҲҳЎў]/g, ch=>{
+      const low = ch.toLowerCase();
+      const lat = map[low] ?? ch;
+      return ch===low ? lat : (lat.charAt(0).toUpperCase()+lat.slice(1));
+    });
+  }
+  function latinToKiril(s){
+    // минимал конвертер: (ch, sh, yo, yu, ya, o‘, g‘)
+    let t = s;
+    t = t.replace(/g‘/gi, m => m[0]==="G" ? "Ғ" : "ғ");
+    t = t.replace(/o‘/gi, m => m[0]==="O" ? "Ў" : "ў");
+    t = t.replace(/yo/gi, m => m[0]==="Y" ? "Ё" : "ё");
+    t = t.replace(/yu/gi, m => m[0]==="Y" ? "Ю" : "ю");
+    t = t.replace(/ya/gi, m => m[0]==="Y" ? "Я" : "я");
+    t = t.replace(/ch/gi, m => m[0]==="C" ? "Ч" : "ч");
+    t = t.replace(/sh/gi, m => m[0]==="S" ? "Ш" : "ш");
+    const map = {
+      "a":"а","b":"б","v":"в","g":"г","d":"д","e":"е","j":"ж","z":"з","i":"и","y":"й","k":"к","l":"л","m":"м","n":"н",
+      "o":"о","p":"п","r":"р","s":"с","t":"т","u":"у","f":"ф","x":"х","q":"қ","h":"ҳ"
+    };
+    t = t.replace(/[A-Za-z]/g, ch=>{
+      const low = ch.toLowerCase();
+      const kr = map[low] ?? ch;
+      return ch===low ? kr : kr.toUpperCase();
+    });
+    return t;
+  }
+
+  let latinMode = false;
+  tr.addEventListener("click", ()=>{
+    const s = txt.value;
+    txt.value = latinMode ? latinToKiril(s) : kirilToLatin(s);
+    latinMode = !latinMode;
+  });
+
+  async function runSearch(){
+    const text = txt.value.trim();
+    results.innerHTML = "";
+    stat.textContent = "Қидирилмоқда...";
+    const r = await fetch("/api/search", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ cat, mode, text })
+    });
+    const data = await r.json();
+    if(!data.ok){
+      stat.textContent = "Хатолик";
+      return;
+    }
+
+    if(mode==="doc"){
+      stat.textContent = `Калитлар: ${(data.keywords||[]).slice(0,8).join(", ")}`;
+    } else {
+      stat.textContent = "";
+    }
+
+    const list = data.results || [];
+    if(list.length===0){
+      results.innerHTML = `<div class="empty">Натижа топилмади. Сўзни қисқартириб ёки бошқача синоним қилинг.</div>`;
+      return;
+    }
+
+    results.innerHTML = list.map(it=>`
+      <div class="item">
+        <div class="item-head">
+          <div class="item-title">${escapeHtml(it.code_title)} ${it.article_no ? "— Модда "+escapeHtml(it.article_no): ""}</div>
+          <a class="link" target="_blank" href="${it.url}">lex.uz</a>
+        </div>
+        <div class="item-sub">${escapeHtml(it.title || "")}</div>
+        <div class="item-text">${escapeHtml(it.snippet || "")}</div>
+      </div>
+    `).join("");
+  }
+
+  function escapeHtml(s){
+    return (s||"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+</script>
+</body>
+</html>
