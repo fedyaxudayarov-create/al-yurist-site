@@ -1,102 +1,155 @@
-import os, re, json
+# build_index.py
+# -*- coding: utf-8 -*-
+
+import os
+import re
+import json
 from datetime import datetime
 
-DATA_DIR = "data"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
 OUT_PATH = os.path.join(DATA_DIR, "index.json")
 
+# Қайси файл қайси категория экани
+SOURCES = [
+    ("mehnat", "Меҳнат кодекси", "mehnat_kodeksi.txt"),
+    ("mamuriy", "Маъмурий жавобгарлик кодекси", "mamuriy_kodeks.txt"),
+    ("jinoyat", "Жиноят кодекси", "jinoyat_kodeksi.txt"),
+    ("konstitutsiya", "Конституция", "konstitutsiya.txt"),
+    ("davlat_xizmati", "Давлат фуқаролик хизмати тўғрисидаги қонун", "davlat_xizmati.txt"),
+    ("mahalliy_hokimiyat", "Маҳаллий давлат ҳокимияти тўғрисидаги қонун", "mahalliy_hokimiyat.txt"),
+]
+
+# "Модда 12." / "Modda 12." / "12-модда" каби вариантларни ушлаймиз
+RE_ARTICLE_HEAD = re.compile(
+    r"(?im)^\s*(?:"
+    r"(?:МОДДА|Модда|Modda)\s*(\d+)\s*[\.\-:]?\s*(.*)$"
+    r"|"
+    r"(\d+)\s*[-–]\s*(?:модда|Модда|МОДДА)\s*[\.\-:]?\s*(.*)$"
+    r")"
+)
+
 def read_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    # UTF-8, баъзи Word->txtларда BOM бўлиши мумкин
+    with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
         return f.read()
 
-def normalize(s: str) -> str:
-    s = s.lower()
-    s = re.sub(r"[^\w\s‘’ʼ'-]", " ", s, flags=re.U)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+def normalize_spaces(s: str) -> str:
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    # ортиқча пробел/қаторлар
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
 
-def split_into_articles(text: str):
+def split_by_articles(text: str):
     """
-    Оддий, лекин ишончли усул:
-    'Модда 1.' / '1-модда' / '1. ' каби сарлавҳаларни ушлаб, блокларга бўлади.
+    Моддалар бўйича бўлиб беради.
+    Агар модда топилмаса, None қайтаради.
     """
-    t = text.replace("\r", "")
-    # турли ёзилишларни қўллаб-қувватлаш
-    pattern = re.compile(
-        r"(?P<h>(?:\n|^)\s*(?:\d+\s*[-–]?\s*модда|\bмодда\s*\d+|\d+\.)\s*.*)",
-        re.IGNORECASE
-    )
+    matches = list(RE_ARTICLE_HEAD.finditer(text))
+    if not matches:
+        return None
 
-    hits = list(pattern.finditer(t))
-    if not hits:
-        # Агар моддага бўлинмаса — бутун матнни 1та ҳужжат қиламиз
-        return [{"article_no": None, "title": "Матн", "body": t.strip()}]
-
-    blocks = []
-    for i, m in enumerate(hits):
+    parts = []
+    for i, m in enumerate(matches):
         start = m.start()
-        end = hits[i+1].start() if i+1 < len(hits) else len(t)
-        block = t[start:end].strip()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
 
-        first_line = block.split("\n", 1)[0].strip()
-        body = block[len(first_line):].strip()
+        # Гуруҳлар: (1)moddaNo (2)title ёки (3)moddaNo2 (4)title2
+        modda_no = m.group(1) or m.group(3) or ""
+        title = (m.group(2) or m.group(4) or "").strip()
+        chunk = text[start:end].strip()
 
-        # article рақамини топиш
-        num = None
-        mnum = re.search(r"(\d+)", first_line)
-        if mnum:
-            num = int(mnum.group(1))
+        parts.append((modda_no, title, chunk))
+    return parts
 
-        blocks.append({
-            "article_no": num,
-            "title": first_line,
-            "body": body if body else block
-        })
-    return blocks
+def chunk_fallback(text: str, max_chars: int = 1800):
+    """
+    Агар модда бўлинмаса — катта матнни қисмларга бўлиб қўямиз
+    """
+    paras = [p.strip() for p in text.split("\n\n") if p.strip()]
+    chunks = []
+    buf = ""
+    for p in paras:
+        if len(buf) + len(p) + 2 <= max_chars:
+            buf = (buf + "\n\n" + p).strip()
+        else:
+            if buf:
+                chunks.append(buf)
+            buf = p
+    if buf:
+        chunks.append(buf)
+    return chunks
 
-def build():
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    sources = [
-        # кейин бошқаларни қўшасиз
-        ("mehnat", "Меҳнат кодекси", os.path.join(DATA_DIR, "mehnat_kodeksi.txt")),
-    ]
+def build_index():
+    if not os.path.isdir(DATA_DIR):
+        raise RuntimeError(f"data папка топилмади: {DATA_DIR}")
 
     items = []
-    for cat, doc_name, path in sources:
-        if not os.path.exists(path):
-            print(f"[SKIP] Not found: {path}")
+    missing = []
+
+    for cat, cat_title, filename in SOURCES:
+        fpath = os.path.join(DATA_DIR, filename)
+        if not os.path.isfile(fpath):
+            missing.append(filename)
             continue
 
-        text = read_text(path)
-        articles = split_into_articles(text)
+        raw = normalize_spaces(read_text(fpath))
 
-        for a in articles:
-            body = a["body"].strip()
-            if len(body) < 50:
-                continue
+        # 1) модда бўйича бўлиш
+        parts = split_by_articles(raw)
 
-            item = {
-                "id": f"{cat}-{a['article_no'] or 'x'}-{len(items)}",
-                "category": cat,
-                "doc_name": doc_name,
-                "article_no": a["article_no"],
-                "title": a["title"],
-                "text": body,
-                "text_norm": normalize(a["title"] + " " + body),
-                "source": path,
-            }
-            items.append(item)
+        if parts:
+            for idx, (modda_no, title, body) in enumerate(parts, start=1):
+                # Жуда қисқа “модда”лар бўлса ташлаб кетамиз
+                if len(body) < 40:
+                    continue
+                items.append({
+                    "id": f"{cat}:{modda_no or idx}",
+                    "cat": cat,
+                    "cat_title": cat_title,
+                    "label": f"Модда {modda_no}" if modda_no else f"Қисм {idx}",
+                    "title": title,
+                    "text": body,
+                    "source_file": filename,
+                })
+        else:
+            # 2) fallback chunk
+            chunks = chunk_fallback(raw)
+            for idx, ch in enumerate(chunks, start=1):
+                if len(ch) < 80:
+                    continue
+                items.append({
+                    "id": f"{cat}:chunk{idx}",
+                    "cat": cat,
+                    "cat_title": cat_title,
+                    "label": f"Қисм {idx}",
+                    "title": "",
+                    "text": ch,
+                    "source_file": filename,
+                })
 
-    payload = {
+    meta = {
         "generated_at": datetime.utcnow().isoformat() + "Z",
-        "count": len(items),
-        "items": items
+        "total_items": len(items),
+        "missing_files": missing,
     }
 
-    with open(OUT_PATH, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    out = {
+        "meta": meta,
+        "items": items,
+    }
 
-    print(f"[OK] Wrote {OUT_PATH} with {len(items)} items")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(OUT_PATH, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, indent=2)
+
+    print("[OK] index.json yozildi:", OUT_PATH)
+    print("[OK] Jami items:", len(items))
+    if missing:
+        print("[WARN] Topilmagan fayllar:", ", ".join(missing))
+    else:
+        print("[OK] Hamma fayl bor.")
 
 if __name__ == "__main__":
-    build()
+    build_index()
