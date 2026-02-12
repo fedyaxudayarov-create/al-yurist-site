@@ -1,203 +1,203 @@
 # build_index.py
 import os
 import re
-import json
-import hashlib
+import sqlite3
 from pathlib import Path
-from collections import defaultdict, Counter
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-OUT_PATH = DATA_DIR / "search_index.json"
+DB_PATH = DATA_DIR / "lex_index.db"
 
-# -----------------------------
-# Text helpers
-# -----------------------------
-def read_text_best_effort(path: Path) -> str:
-    raw = path.read_bytes()
-    for enc in ("utf-8", "utf-8-sig", "cp1251", "windows-1251", "latin-1"):
+# filename -> (code_key, code_title)
+CODE_FILES = {
+    "mehnat_kodeksi.txt": ("mehnat", "Меҳнат кодекси"),
+    "jinoyat_kodeksi.txt": ("jinoyat", "Жиноят кодекси"),
+    "mamuriy_kodeks.txt": ("mamuriy", "Маъмурий жавобгарлик тўғрисидаги кодекс"),
+    "konstitutsiya.txt": ("konstitutsiya", "Конституция"),
+    "davlat_xizmati.txt": ("davlat", "Давлат фуқаролик хизмати тўғрисидаги қонун"),
+    "mahalliy_hokimiyat.txt": ("mahalliy", "Маҳаллий давлат ҳокимияти тўғрисидаги қонун"),
+}
+
+# Модда сарлавҳасини ушлайди:
+# 1-модда. ...
+# 1 - модда ...
+# Модда 1. ...
+ARTICLE_PATTERNS = [
+    re.compile(r"(?mi)^\s*(\d+)\s*[-–—]?\s*(модда|modda)\.?\s*(.*)$"),
+    re.compile(r"(?mi)^\s*(модда|modda)\s*(\d+)\.?\s*(.*)$"),
+]
+
+def read_text(p: Path) -> str:
+    # TXT’лар турли кодировкада бўлиши мумкин
+    for enc in ("utf-8", "utf-8-sig", "cp1251"):
         try:
-            return raw.decode(enc)
+            return p.read_text(encoding=enc)
         except Exception:
             pass
-    # fallback
-    return raw.decode("utf-8", errors="ignore")
+    # охирги чора
+    return p.read_text(encoding="utf-8", errors="ignore")
 
-def normalize_space(s: str) -> str:
-    s = s.replace("\r\n", "\n").replace("\r", "\n")
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
+def split_articles(full_text: str):
+    """
+    Қайтаради: list of dicts:
+    {article_no, title, text}
+    """
+    text = full_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return []
 
-# Uzbek apostrophe normalization
-def norm_apostrophes(s: str) -> str:
-    return (
-        s.replace("’", "'")
-         .replace("ʻ", "'")
-         .replace("ʼ", "'")
-         .replace("`", "'")
-    )
+    # Энг биринчи паттерн билан топиб кўрамиз, топилмаса иккинчиси
+    matches = []
+    used_pat = None
+    for pat in ARTICLE_PATTERNS:
+        ms = list(pat.finditer(text))
+        if len(ms) >= 2:  # камида 2 та модда бўлса, парслаш осон
+            matches = ms
+            used_pat = pat
+            break
 
-# Minimal translit: Cyrillic -> Latin (approx) and Latin -> Cyrillic (approx)
-_C2L = {
-    "а":"a","б":"b","в":"v","г":"g","д":"d","е":"e","ё":"yo","ж":"j","з":"z","и":"i","й":"y","к":"k","л":"l","м":"m",
-    "н":"n","о":"o","п":"p","р":"r","с":"s","т":"t","у":"u","ф":"f","х":"x","ц":"ts","ч":"ch","ш":"sh","щ":"sh",
-    "ъ":"","ь":"","э":"e","ю":"yu","я":"ya","қ":"q","ғ":"g'","ҳ":"h","ў":"o'",
-}
-def cyr_to_lat(s: str) -> str:
-    out = []
-    for ch in s:
-        low = ch.lower()
-        if low in _C2L:
-            rep = _C2L[low]
-            out.append(rep)
+    # Агар модда сарлавҳалари топилмаса — йирик парча қилиб қўямиз
+    if not matches:
+        chunks = []
+        step = 1800
+        for i in range(0, len(text), step):
+            part = text[i:i+step].strip()
+            if part:
+                chunks.append({
+                    "article_no": "",
+                    "title": "Матн бўлими",
+                    "text": part
+                })
+        return chunks
+
+    items = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i+1].start() if i+1 < len(matches) else len(text)
+        block = text[start:end].strip()
+
+        g = m.groups()
+
+        # Иккита форматни нормаллаштирамиз
+        # Pattern1: (\d+) (модда) (title)
+        # Pattern2: (модда) (\d+) (title)
+        if used_pat is ARTICLE_PATTERNS[0]:
+            article_no = g[0].strip()
+            title_tail = (g[2] or "").strip()
         else:
-            out.append(ch.lower())
-    return "".join(out)
+            article_no = g[1].strip()
+            title_tail = (g[2] or "").strip()
 
-# very rough latin->cyr (only for matching)
-_L2C_MULTI = [
-    ("g'", "ғ"), ("o'", "ў"),
-    ("sh", "ш"), ("ch", "ч"), ("yo", "ё"), ("yu", "ю"), ("ya", "я"), ("ts", "ц"),
-]
-_L2C_SINGLE = {
-    "a":"а","b":"б","v":"в","g":"г","d":"д","e":"е","j":"ж","z":"з","i":"и","y":"й","k":"к","l":"л","m":"м",
-    "n":"н","o":"о","p":"п","r":"р","s":"с","t":"т","u":"у","f":"ф","x":"х","h":"ҳ","q":"қ",
-}
-def lat_to_cyr(s: str) -> str:
-    s = s.lower()
-    for a, b in _L2C_MULTI:
-        s = s.replace(a, b)
-    out = []
-    for ch in s:
-        out.append(_L2C_SINGLE.get(ch, ch))
-    return "".join(out)
+        # Биринчи қаторда “1-модда. ...” сарлавҳа бўлади — уни тоза қилиб оламиз
+        # Блокни тозалаш: биринчи қаторни қолдирамиз, лекин матнда ҳам бўлсин десангиз қолдириш мумкин.
+        # Биз матнда сақлаб қўямиз, лекин title алоҳида.
+        title = title_tail if title_tail else f"{article_no}-модда"
 
-TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁёҚқҒғҲҳЎў']{2,}")
+        items.append({
+            "article_no": article_no,
+            "title": title,
+            "text": block
+        })
 
-def tokenize(text: str):
-    text = norm_apostrophes(text.lower())
-    return TOKEN_RE.findall(text)
+    return items
 
-# -----------------------------
-# Splitting into articles (modda)
-# -----------------------------
-# Supports:
-# "1-модда", "1 - модда", "Модда 1", "1-modda", "Modda 1"
-MODDA_HEADER_RE = re.compile(
-    r"(?im)^(?:\s*)("
-    r"(?:\d+\s*[-–—]?\s*(?:модда|modda))"
-    r"|(?:модда|modda)\s*\d+"
-    r")\b[^\n]*$"
-)
+def init_db(conn: sqlite3.Connection):
+    cur = conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL;")
+    cur.execute("PRAGMA synchronous=NORMAL;")
+    cur.execute("DROP TABLE IF EXISTS items;")
+    cur.execute("DROP TABLE IF EXISTS items_fts;")
 
-def extract_modda_no(header_line: str) -> str:
-    header_line = header_line.lower()
-    m = re.search(r"(\d+)", header_line)
-    return m.group(1) if m else ""
+    cur.execute("""
+    CREATE TABLE items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code_key TEXT NOT NULL,
+        code_title TEXT NOT NULL,
+        article_no TEXT,
+        title TEXT,
+        text TEXT NOT NULL,
+        url TEXT
+    );
+    """)
 
-def split_into_chunks(full_text: str):
-    """
-    Returns list of (modda_no, title, chunk_text)
-    If no modda headers found -> one chunk with modda_no="".
-    """
-    full_text = normalize_space(full_text)
-    lines = full_text.split("\n")
-    # find header line indices
-    header_idx = []
-    for i, line in enumerate(lines):
-        if MODDA_HEADER_RE.match(line.strip()):
-            header_idx.append(i)
+    # FTS5: қидириш учун
+    cur.execute("""
+    CREATE VIRTUAL TABLE items_fts USING fts5(
+        code_title,
+        article_no,
+        title,
+        text,
+        tokenize = 'unicode61'
+    );
+    """)
 
-    if not header_idx:
-        # no explicit modda -> fallback as one chunk
-        title = lines[0].strip()[:120] if lines else ""
-        return [("", title, full_text)]
+    cur.execute("CREATE INDEX idx_items_code_key ON items(code_key);")
+    conn.commit()
 
-    chunks = []
-    for pos, idx in enumerate(header_idx):
-        start = idx
-        end = header_idx[pos + 1] if pos + 1 < len(header_idx) else len(lines)
-        header = lines[idx].strip()
-        modda_no = extract_modda_no(header)
-        body_lines = lines[start:end]
-        chunk_text = "\n".join(body_lines).strip()
-        title = header
-        chunks.append((modda_no, title, chunk_text))
-    return chunks
+def add_item(conn: sqlite3.Connection, code_key, code_title, article_no, title, text, url):
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO items(code_key, code_title, article_no, title, text, url) VALUES(?,?,?,?,?,?)",
+        (code_key, code_title, article_no, title, text, url)
+    )
+    rowid = cur.lastrowid
+    cur.execute(
+        "INSERT INTO items_fts(rowid, code_title, article_no, title, text) VALUES(?,?,?,?,?)",
+        (rowid, code_title, article_no, title, text)
+    )
+    return rowid
 
-def doc_id(source: str, modda_no: str, text: str) -> str:
-    h = hashlib.sha1()
-    h.update((source + "|" + modda_no + "|" + text[:2000]).encode("utf-8", errors="ignore"))
-    return h.hexdigest()[:16]
-
-# -----------------------------
-# Build index
-# -----------------------------
-def main():
+def build():
     if not DATA_DIR.exists():
-        raise SystemExit(f"ERROR: data/ folder not found: {DATA_DIR}")
+        raise RuntimeError(f"data/ папка топилмади: {DATA_DIR}")
 
-    txt_files = sorted([p for p in DATA_DIR.glob("*.txt") if p.is_file()])
-    if not txt_files:
-        raise SystemExit("ERROR: data/ папкада .txt файл йўқ. (масалан: mehnat_kodeksi.txt)")
+    # DB файлни тозалаймиз
+    if DB_PATH.exists():
+        DB_PATH.unlink()
 
-    docs = []
-    inverted = defaultdict(list)   # token -> [doc_index]
-    sources = []
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
 
-    for path in txt_files:
-        source_key = path.stem  # e.g. mehnat_kodeksi
-        sources.append(source_key)
+    init_db(conn)
 
-        text = read_text_best_effort(path)
-        text = norm_apostrophes(text)
-        text = normalize_space(text)
+    total = 0
+    per_code = {}
 
-        chunks = split_into_chunks(text)
+    for fname, (code_key, code_title) in CODE_FILES.items():
+        p = DATA_DIR / fname
+        if not p.exists():
+            print(f"[SKIP] {fname} топилмади (data/ ичига қўйинг).")
+            continue
 
-        for modda_no, title, chunk_text in chunks:
-            did = doc_id(source_key, modda_no, chunk_text)
-            docs.append({
-                "id": did,
-                "source": source_key,
-                "modda": modda_no,
-                "title": title[:200],
-                "text": chunk_text,
-            })
+        full_text = read_text(p)
+        articles = split_articles(full_text)
 
-    # Build inverted index with extra translit tokens
-    for idx, d in enumerate(docs):
-        toks = tokenize(d["text"])
-        # add translit variants for matching
-        extra = []
-        for t in toks:
-            extra.append(cyr_to_lat(t))
-            extra.append(lat_to_cyr(t))
-        all_toks = toks + extra
+        cnt = 0
+        for a in articles:
+            article_no = a.get("article_no", "") or ""
+            title = a.get("title", "") or ""
+            text = a.get("text", "") or ""
+            if not text.strip():
+                continue
 
-        counts = Counter([t for t in all_toks if len(t) >= 2])
-        for t, c in counts.items():
-            inverted[t].append([idx, c])  # doc idx + term freq
+            # UI’да босилганда ишламай қолмасин десак: #... қиламиз
+            url = f"#:{code_key}:{article_no or cnt+1}"
 
-    out = {
-        "version": 1,
-        "sources": sorted(set(sources)),
-        "docs": docs,
-        "inverted": dict(inverted),
-        "meta": {
-            "files": len(txt_files),
-            "docs": len(docs),
-            "tokens": len(out := inverted),  # just for quick stats
-        }
-    }
-    # fix meta.tokens (since we used out variable trick above)
-    out["meta"]["tokens"] = len(out["inverted"])
+            add_item(conn, code_key, code_title, article_no, title, text, url)
+            cnt += 1
 
-    OUT_PATH.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
-    print(f"OK: built index -> {OUT_PATH}")
-    print(f"Stats: files={len(txt_files)} docs={len(docs)} tokens={len(out['inverted'])}")
-    print("Tip: endi app.py шу data/search_index.json дан қидириши керак.")
+        per_code[code_key] = cnt
+        total += cnt
+        print(f"[OK] {fname} -> {code_key}: {cnt} та бўлим/модда")
+
+    conn.commit()
+    conn.close()
+
+    print("\n======== DONE ========")
+    print(f"DB: {DB_PATH}")
+    print(f"TOTAL ITEMS: {total}")
+    for k, v in per_code.items():
+        print(f" - {k}: {v}")
 
 if __name__ == "__main__":
-    main()
+    build()
