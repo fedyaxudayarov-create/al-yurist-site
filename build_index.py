@@ -26,10 +26,8 @@ CODE_FILES = {
     "davlat_xizmati": "davlat_xizmati.txt",
     "mahalliy_hokimiyat": "mahalliy_hokimiyat.txt",
 }
-
-# "14-modda", "14 - модда", "14–модда" ва ҳ.к. ни ушлайди
-ARTICLE_RE = re.compile(
-    r"(?im)^\s*(\d{1,4})\s*[-–—]?\s*(modda|модда)\b.*$"
+MODDA_RE = re.compile(
+    r"(?im)^\s*(?:(\d{1,4})\s*[-–—]?\s*модда|модда\s*(\d{1,4}))\.?\b\s*(.*)$"
 )
 
 def read_text_file(path: Path) -> str:
