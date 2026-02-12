@@ -1,162 +1,160 @@
-import os
-import re
+# app.py
 import json
-import sqlite3
+import math
+import re
 from pathlib import Path
+from collections import defaultdict
+
 from flask import Flask, render_template, request, jsonify
 
-from rapidfuzz import fuzz
-
-APP_DIR = Path(__file__).parent
-DB_PATH = APP_DIR / "data" / "lex_index.db"
-HR_PATH = APP_DIR / "data" / "hr_templates.json"
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+INDEX_PATH = DATA_DIR / "search_index.json"
 
 app = Flask(__name__)
 
-CATEGORIES = [
-    {"key": "mehnat", "title": "Меҳнат кодекси"},
-    {"key": "jinoyat", "title": "Жиноий жавобгарлик (ЖК)"},
-    {"key": "mamuriy", "title": "Маъмурий жавобгарлик (МЖтК)"},
-    {"key": "konstitutsiya", "title": "Конституция"},
-    {"key": "fuqarolik", "title": "Фуқаролик кодекси"},
-    {"key": "davlat_xizmati", "title": "Давлат фуқаролик хизмати"},
-    {"key": "umumiy", "title": "Қонун-қоидалар (умумий)"},
-    {"key": "hr", "title": "HR шаблонлар"},
-]
+# --- translit helpers (same as build_index) ---
+_LAT2CYR = str.maketrans({
+    "a": "а", "b": "б", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "ҳ", "i": "и", "j": "ж",
+    "k": "к", "l": "л", "m": "м", "n": "н", "o": "о", "p": "п", "q": "қ", "r": "р",
+    "s": "с", "t": "т", "u": "у", "v": "в", "x": "х", "y": "й", "z": "з",
+})
+_CYR2LAT = str.maketrans({
+    "а": "a", "б": "b", "д": "d", "е": "e", "ф": "f", "г": "g", "ҳ": "h", "и": "i", "ж": "j",
+    "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "қ": "q", "р": "r",
+    "с": "s", "т": "t", "у": "u", "в": "v", "х": "x", "й": "y", "з": "z",
+    "ў": "o", "ғ": "g", "ш": "sh", "ч": "ch",
+})
 
-def get_conn():
-    if not DB_PATH.exists():
-        raise RuntimeError(f"База топилмади: {DB_PATH}. Аввал build_index.py ишга туширинг.")
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def lat_to_cyr(s: str) -> str:
+    return s.lower().translate(_LAT2CYR)
 
-def load_hr():
-    if not HR_PATH.exists():
+def cyr_to_lat(s: str) -> str:
+    return s.lower().translate(_CYR2LAT)
+
+def tokenize(text: str) -> list[str]:
+    text = (text or "").lower()
+    parts = re.findall(r"[a-zа-яёғўқҳчш0-9]+", text, flags=re.IGNORECASE)
+    return [p for p in parts if p]
+
+# --- load index ---
+INDEX = None
+DOCS = None
+INVERTED = None
+IDF = None
+
+SOURCE_LABELS = {
+    "mehnat_kodeksi": "Меҳнат кодекси",
+    "mamuriy_kodeks": "Маъмурий жавобгарлик (МЖтК)",
+    "jinoyat_kodeksi": "Жиноят кодекси",
+    "konstitutsiya": "Конституция",
+    "davlat_xizmati": "Давлат фуқаролик хизмати",
+    "fuqarolik_kodeksi": "Фуқаролик кодекси",
+    "mahalliy_hokimiyat": "Маҳаллий давлат ҳокимияти тўғрисида",
+}
+
+def load_index():
+    global INDEX, DOCS, INVERTED, IDF
+    if not INDEX_PATH.exists():
+        INDEX = {"docs": [], "inverted": {}, "meta": {}}
+        DOCS, INVERTED, IDF = [], {}, {}
+        return
+
+    INDEX = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+    DOCS = INDEX.get("docs", [])
+    INVERTED = INDEX.get("inverted", {})
+
+    # compute idf
+    N = max(1, len(DOCS))
+    df = {}
+    for tok, postings in INVERTED.items():
+        df[tok] = len(postings)
+    IDF = {t: math.log((N + 1) / (dfv + 1)) + 1.0 for t, dfv in df.items()}
+
+load_index()
+
+def score_query(query: str, source_filter: str | None = None, limit: int = 20):
+    if not query or not query.strip():
         return []
-    return json.loads(HR_PATH.read_text(encoding="utf-8"))
 
-def normalize_query(q: str) -> str:
-    q = (q or "").strip()
-    q = re.sub(r"\s+", " ", q)
-    return q
+    q = query.strip()
+    qtoks = tokenize(q)
 
-def extract_keywords(text: str, max_words: int = 12):
-    """
-    Буйруқ/қарор матнидан калит сўзларни оддий усулда ажратиб оламиз.
-    (кейинчалик NLP билан кучайтириш мумкин)
-    """
-    text = normalize_query(text).lower()
-    # ўзбек/рус ҳарфлари + сонларни қолдирамиз
-    words = re.findall(r"[a-zа-яёўқғҳ]+", text, flags=re.IGNORECASE)
-    stop = set(["ва", "ҳам", "учун", "билан", "ёки", "буйруқ", "қарор", "№", "сонли", "тўғрисида",
-                "the", "and", "for", "with", "о", "об", "по", "в", "на", "и", "или", "это"])
-    freq = {}
-    for w in words:
-        if len(w) < 4:
+    # add translit variants (query side)
+    extra = []
+    for t in qtoks:
+        extra.append(cyr_to_lat(t))
+        extra.append(lat_to_cyr(t))
+    qtoks = qtoks + extra
+
+    # detect "modda" number
+    modda_num = None
+    m = re.search(r"(\d{1,4})", q)
+    if m:
+        modda_num = m.group(1)
+
+    scores = defaultdict(float)
+    matched = set()
+
+    for t in qtoks:
+        postings = INVERTED.get(t)
+        if not postings:
             continue
-        if w in stop:
-            continue
-        freq[w] = freq.get(w, 0) + 1
-    # энг кўп учраганлар
-    kws = sorted(freq.items(), key=lambda x: x[1], reverse=True)[:max_words]
-    return [k for k, _ in kws]
+        idf = IDF.get(t, 1.0)
+        for doc_idx, tf in postings:
+            d = DOCS[doc_idx]
+            if source_filter and d.get("source") != source_filter:
+                continue
+            scores[doc_idx] += (1.0 + math.log(1 + tf)) * idf
+            matched.add(doc_idx)
 
-def search_fts(q: str, code_key: str, limit: int = 15):
-    q = normalize_query(q)
-    if not q:
-        return []
+    # boost exact modda match
+    if modda_num:
+        for doc_idx in list(matched):
+            d = DOCS[doc_idx]
+            if str(d.get("modda", "")).strip() == modda_num:
+                scores[doc_idx] += 5.0
 
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
+    ranked = sorted(matched, key=lambda i: scores[i], reverse=True)[:limit]
 
-        # категория фильтри
-        where = ""
-        params = {}
-
-        # "umumiy" — барчасидан қидиради
-        if code_key and code_key not in ("umumiy", "hr"):
-            where = "WHERE code_key = :ck"
-            params["ck"] = code_key
-
-        # FTS запрос: сўзларга бўлиб, prefix қидириш
-        tokens = [t for t in re.split(r"\s+", q) if t]
-        fts_q = " AND ".join([f'{t}*' for t in tokens[:8]])
-
-        sql = f"""
-        SELECT i.code_title, i.article_no, i.title, i.text, i.url
-        FROM items_fts f
-        JOIN items i ON i.id = f.rowid
-        WHERE items_fts MATCH :fts
-        """
-        params["fts"] = fts_q
-
-        if where:
-            sql += f" AND i.code_key = :ck"
-
-        sql += " LIMIT :lim"
-        params["lim"] = limit
-
-        rows = cur.execute(sql, params).fetchall()
-        results = []
-        for r in rows:
-            snippet = r["text"][:450] + ("..." if len(r["text"]) > 450 else "")
-            results.append({
-                "code_title": r["code_title"],
-                "article_no": r["article_no"] or "",
-                "title": r["title"],
-                "snippet": snippet,
-                "url": r["url"],
-            })
-        return results
-    finally:
-        conn.close()
-
-def search_hr(q: str, limit: int = 10):
-    q = normalize_query(q).lower()
-    items = load_hr()
-    scored = []
-    for it in items:
-        hay = (it.get("title","") + " " + " ".join(it.get("tags", [])) + " " + it.get("text","")).lower()
-        score = fuzz.partial_ratio(q, hay) if q else 0
-        scored.append((score, it))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    out = []
-    for score, it in scored[:limit]:
-        out.append({
-            "title": it["title"],
-            "snippet": it["text"][:450] + ("..." if len(it["text"]) > 450 else ""),
-            "full": it["text"]
+    results = []
+    for i in ranked:
+        d = DOCS[i]
+        text = d.get("text", "")
+        snippet = text[:420].replace("\n", " ")
+        results.append({
+            "source": d.get("source"),
+            "source_label": SOURCE_LABELS.get(d.get("source"), d.get("source")),
+            "modda": d.get("modda"),
+            "title": d.get("title", ""),
+            "snippet": snippet + ("..." if len(text) > 420 else ""),
+            "score": round(scores[i], 4),
         })
-    return out
+    return results
 
-@app.get("/")
-def index():
-    cat = request.args.get("cat", "mehnat")
-    mode = request.args.get("mode", "q")  # q=калит сўз, doc=буйруқ матни
-    return render_template("index.html", categories=CATEGORIES, cat=cat, mode=mode)
+@app.route("/", methods=["GET"])
+def home():
+    # UI сизда templates/index.html да турибди
+    return render_template("index.html")
 
-@app.post("/api/search")
+@app.route("/api/search", methods=["GET"])
 def api_search():
-    payload = request.get_json(force=True, silent=True) or {}
-    cat = payload.get("cat", "mehnat")
-    mode = payload.get("mode", "q")
-    text = payload.get("text", "")
+    q = request.args.get("q", "")
+    source = request.args.get("source", "").strip() or None
+    mode = request.args.get("mode", "q")  # q = keyword, a = "asos topish"
+    # mode ҳозирча бир хил: иккаласида ҳам q текстдан излайди
 
-    if cat == "hr":
-        return jsonify({"ok": True, "results": search_hr(text)})
+    results = score_query(q, source_filter=source, limit=25)
+    return jsonify({"ok": True, "count": len(results), "results": results, "mode": mode})
 
-    if mode == "doc":
-        kws = extract_keywords(text)
-        # калит сўзлардан битта query ясаймиз
-        q = " ".join(kws[:8])
-        results = search_fts(q, cat)
-        return jsonify({"ok": True, "keywords": kws, "query": q, "results": results})
-
-    # mode == "q"
-    results = search_fts(text, cat)
-    return jsonify({"ok": True, "results": results})
+@app.route("/api/sources", methods=["GET"])
+def api_sources():
+    sources = INDEX.get("sources", [])
+    out = []
+    for s in sources:
+        out.append({"key": s, "label": SOURCE_LABELS.get(s, s)})
+    return jsonify({"ok": True, "sources": out})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), debug=True)
+    # Локалда ишлатиш учун
+    app.run(host="0.0.0.0", port=5000, debug=True)
