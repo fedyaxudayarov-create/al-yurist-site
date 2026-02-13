@@ -1,14 +1,18 @@
 import sqlite3
+import google.generativeai as genai
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify
 
+# 🔑 Сизнинг API Key (скриншотдан олинди)
+API_KEY = "AIzaSyCNStlqZ1QFdTQJaenHXjndnBuDACzRKq4"
+genai.configure(api_key=API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
+
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-DB_PATH = DATA_DIR / "lex_index.db"
+DB_PATH = BASE_DIR / "data" / "lex_index.db"
 
 app = Flask(__name__)
 
-# Сизнинг index.html даги тугмачалар учун категориялар рўйхати
 CATEGORIES = [
     {"key": "mehnat", "title": "Меҳнат кодекси"},
     {"key": "jinoyat", "title": "Жиноят кодекси"},
@@ -23,52 +27,52 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    # index.html кутаётган категорияларни юборамиз
-    current_cat = request.args.get("cat", "mehnat")
-    current_mode = request.args.get("mode", "q")
-    return render_template("index.html", categories=CATEGORIES, cat=current_cat, mode=current_mode)
+    return render_template("index.html", categories=CATEGORIES, cat="mehnat", mode="q")
 
 @app.route("/api/search", methods=["POST"])
 def api_search():
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
-    cat = (data.get("cat") or "mehnat").strip()
+    data = request.get_json() or {}
+    text = data.get("text", "").strip()
+    cat = data.get("cat", "mehnat")
 
     if not text:
-        return jsonify({"ok": False, "error": "Матн бўш"}), 400
+        return jsonify({"ok": False, "error": "Матн киритилмаган"})
 
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Қидирув сўрови (FTS5 технологияси билан)
-        # Агар матнда иккита сўз бўлса, уларни 'AND' билан боғлаймиз
+        # 1. Базадан қидириш
         search_query = " AND ".join(text.split())
-        
-        query = """
-            SELECT items.* FROM items 
-            JOIN items_fts ON items.id = items_fts.rowid 
-            WHERE items_fts MATCH ? AND items.code_key = ?
-            LIMIT 15
-        """
+        query = "SELECT * FROM items JOIN items_fts ON items.id = items_fts.rowid WHERE items_fts MATCH ? AND code_key = ? LIMIT 3"
         rows = cur.execute(query, (search_query, cat)).fetchall()
-        conn.close()
-
+        
         results = []
+        context_for_ai = ""
+        
         for row in rows:
             results.append({
                 "code_title": row["code_title"],
                 "article_no": row["article_no"],
                 "title": row["title"],
-                "snippet": row["text"][:450] + "...",
-                "url": row["url"] if row["url"] else "https://lex.uz"
+                "snippet": row["text"], # Тўлиқ матнни чиқарамиз
+                "url": row["url"] or "https://lex.uz"
             })
+            context_for_ai += f"\nМодда {row['article_no']}: {row['text']}\n"
         
-        return jsonify({"ok": True, "results": results})
+        # 2. Агар маълумот топилса, Gemini-дан шарҳ сўраймиз
+        ai_comment = ""
+        if results:
+            prompt = f"Сен профессионал юристсан. Қуйидаги қонун матнига асосланиб, фойдаланувчининг '{text}' деган сўровига қисқа ва аниқ тушунтириш бер:\n{context_for_ai}"
+            response = model.generate_content(prompt)
+            ai_comment = response.text
+
+        conn.close()
+        return jsonify({"ok": True, "results": results, "ai_comment": ai_comment})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": False, "error": str(e)})
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
