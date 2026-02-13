@@ -1,3 +1,6 @@
+# app.py нинг энг бошига қўшиш мумкин:
+import os
+os.environ["GOOGLE_API_USE_MTLS_ENDPOINT"] = "never"
 import sqlite3
 import google.generativeai as genai
 from pathlib import Path
@@ -6,8 +9,8 @@ from flask import Flask, render_template, request, jsonify
 # app.py ичидаги мана шу қаторни топинг ва алмаштиринг:
 API_KEY = "AIzaSyADOBxK551UG6yAyl_u3o_VFm0bSRKv6YY"
 genai.configure(api_key=API_KEY)
-# 9-қаторни шундай ёзинг:
-model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
+# 9-қаторни айнан шундай қилиб ёзинг (префикссиз):
+model = genai.GenerativeModel('gemini-1.5-flash')
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "lex_index.db"
 
@@ -76,6 +79,7 @@ def api_search():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
 
 
 
