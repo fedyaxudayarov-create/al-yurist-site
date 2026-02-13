@@ -1,148 +1,123 @@
 # build_index.py
-# -*- coding: utf-8 -*-
-
-import os
 import re
 import sqlite3
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent / "data"
+APP_DIR = Path(__file__).parent
+DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "lex_index.db"
 
-# Файл номи -> (code_key, code_title)
-CODE_MAP = {
-    "mehnat_kodeksi": ("mehnat", "Меҳнат кодекси"),
-    "jinoyat_kodeksi": ("jinoyat", "Жиноят кодекси"),
-    "mamuriy_kodeks": ("mamuriy", "Маъмурий жавобгарлик тўғрисидаги кодекс"),
-    "konstitusiya": ("konstitusiya", "Конституция"),
-    "davlat_xizmati": ("davlat", "Давлат фуқаролик хизмати"),
-    "mahalliy_hokimiyat": ("mahalliy", "Маҳаллий давлат ҳокимияти тўғрисидаги Қонун"),
+# файл номи -> категория (app.py dagi key’лар)
+MAP = {
+    "mehnat_kodeksi": "mehnat",
+    "jinoyat_kodeksi": "jinoyat",
+    "mamuriy_kodeks": "mamuriy",
+    "konstitutsiya": "konstitutsiya",
+    "davlat_xizmati": "davlat_xizmati",
+    "fuqarolik_kodeksi": "fuqarolik",
 }
 
-# "14-модда", "14 модда", "14 - модда" (кирилл/лотин аралаш) ни ушлаш
-ARTICLE_RE = re.compile(
-    r"^\s*(\d{1,4})\s*[-–—]?\s*модда\b.*$",
-    re.IGNORECASE
-)
+ARTICLE_RE = re.compile(r"(?mi)^(?:Модда|Modda|Статья|Article)\s+(\d+)\s*[\.\-–:]?\s*(.*)$")
 
-def normalize_text(s: str) -> str:
-    s = s.replace("\ufeff", "").replace("\r", "")
-    # ортиқча бўшлиқларни йиғамиз
-    s = re.sub(r"[ \t]+", " ", s)
-    return s.strip()
+def detect_code_key(stem: str) -> str:
+    return MAP.get(stem, "umumiy")
 
-def split_into_articles(full_text: str):
-    """
-    Кўпинча кодекслар 'XX-модда' билан келади.
-    Шу бўйича бўлиб, ҳар бир моддани алоҳида item қиламиз.
-    Топилмаса — бутун файлни битта item қиламиз.
-    """
-    lines = [ln.strip() for ln in full_text.split("\n")]
-    items = []
-    cur_no = None
-    cur_title = None
-    cur_buf = []
+def split_articles(text: str):
+    text = text.replace("\r\n", "\n")
+    matches = list(ARTICLE_RE.finditer(text))
+    if not matches:
+        return [("", "", text.strip())]
 
-    def flush():
-        nonlocal cur_no, cur_title, cur_buf
-        if cur_no is None:
-            return
-        text = "\n".join([x for x in cur_buf if x.strip()])
-        items.append((cur_no, cur_title or f"{cur_no}-модда", text.strip()))
-        cur_no = None
-        cur_title = None
-        cur_buf = []
-
-    for ln in lines:
-        m = ARTICLE_RE.match(ln)
-        if m:
-            flush()
-            cur_no = m.group(1)
-            # Сарлавҳа: шу сатрининг ўзи (одатда сарлавҳа шу ерда)
-            cur_title = ln.strip()
-            cur_buf = []
-        else:
-            if cur_no is not None:
-                cur_buf.append(ln)
-
-    flush()
-
-    if not items:
-        # modda топилмаса
-        text = "\n".join([x for x in lines if x.strip()])
-        return [("0", "Матн", text.strip())]
-
-    return items
-
-def ensure_schema(conn: sqlite3.Connection):
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            code_key TEXT,
-            code_title TEXT,
-            article_no TEXT,
-            title TEXT,
-            text TEXT,
-            url TEXT
-        )
-    """)
-    # FTS5 (sqlite билан бирга келади, Render’da ҳам одатда бор)
-    cur.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS items_fts
-        USING fts5(title, text, content='items', content_rowid='id')
-    """)
-    conn.commit()
+    parts = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        article_no = m.group(1).strip()
+        title = (m.group(2) or "").strip()
+        body = text[m.end():end].strip()
+        # сарлавҳа + матнни бирга сақлаймиз
+        full_text = f"{m.group(0).strip()}\n{body}".strip()
+        parts.append((article_no, title, full_text))
+    return parts
 
 def main():
-    if not DATA_DIR.exists():
-        raise SystemExit(f"data папка топилмади: {DATA_DIR}")
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Эски DB ни ўчириш
     if DB_PATH.exists():
         DB_PATH.unlink()
 
-    conn = sqlite3.connect(str(DB_PATH))
-    try:
-        ensure_schema(conn)
-        cur = conn.cursor()
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
 
-        txt_files = sorted([p for p in DATA_DIR.glob("*.txt") if p.is_file()])
-        files_used = 0
-        total_items = 0
+    cur.execute("""
+        CREATE TABLE items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code_key TEXT NOT NULL,
+            code_title TEXT NOT NULL,
+            article_no TEXT,
+            title TEXT,
+            text TEXT NOT NULL,
+            url TEXT
+        );
+    """)
 
-        for fp in txt_files:
-            stem = fp.stem.lower()
-            code_key, code_title = CODE_MAP.get(stem, (stem, stem))
+    cur.execute("""
+        CREATE VIRTUAL TABLE items_fts USING fts5(
+            text,
+            content='items',
+            content_rowid='id',
+            tokenize='unicode61'
+        );
+    """)
 
-            raw = fp.read_text(encoding="utf-8", errors="ignore")
-            raw = normalize_text(raw)
+    cur.execute("""
+        CREATE TRIGGER items_ai AFTER INSERT ON items BEGIN
+            INSERT INTO items_fts(rowid, text) VALUES (new.id, new.text);
+        END;
+    """)
+    cur.execute("""
+        CREATE TRIGGER items_ad AFTER DELETE ON items BEGIN
+            INSERT INTO items_fts(items_fts, rowid, text) VALUES('delete', old.id, old.text);
+        END;
+    """)
+    cur.execute("""
+        CREATE TRIGGER items_au AFTER UPDATE ON items BEGIN
+            INSERT INTO items_fts(items_fts, rowid, text) VALUES('delete', old.id, old.text);
+            INSERT INTO items_fts(rowid, text) VALUES (new.id, new.text);
+        END;
+    """)
 
-            articles = split_into_articles(raw)
+    # code_title – интерфейсда чиқиши учун
+    code_titles = {
+        "mehnat": "Меҳнат кодекси",
+        "jinoyat": "Жиноий жавобгарлик (ЖК)",
+        "mamuriy": "Маъмурий жавобгарлик (МЖтК)",
+        "konstitutsiya": "Конституция",
+        "fuqarolik": "Фуқаролик кодекси",
+        "davlat_xizmati": "Давлат фуқаролик хизмати",
+        "umumiy": "Қонун-қоидалар (умумий)",
+    }
 
-            for article_no, title, text in articles:
-                if not text:
-                    continue
-                cur.execute(
-                    "INSERT INTO items(code_key, code_title, article_no, title, text, url) VALUES (?,?,?,?,?,?)",
-                    (code_key, code_title, str(article_no), title, text, "")
-                )
-                rowid = cur.lastrowid
-                cur.execute(
-                    "INSERT INTO items_fts(rowid, title, text) VALUES (?,?,?)",
-                    (rowid, title, text)
-                )
-                total_items += 1
+    added = 0
+    for path in sorted(DATA_DIR.glob("*.txt")):
+        stem = path.stem
+        code_key = detect_code_key(stem)
+        code_title = code_titles.get(code_key, code_key)
 
-            files_used += 1
+        text = path.read_text(encoding="utf-8", errors="ignore").strip()
+        if not text:
+            continue
 
-        conn.commit()
+        for article_no, title, full_text in split_articles(text):
+            cur.execute(
+                "INSERT INTO items(code_key, code_title, article_no, title, text, url) VALUES(?,?,?,?,?,?)",
+                (code_key, code_title, article_no or None, title or None, full_text, "")
+            )
+            added += 1
 
-        print(f"Index ready: {files_used} files, {total_items} items")
-        print(f"DB path: {DB_PATH}")
-
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
+    print(f"✅ Индекс тайёр: {added} та модда/бўлим қўшилди. Файл: {DB_PATH}")
 
 if __name__ == "__main__":
     main()
