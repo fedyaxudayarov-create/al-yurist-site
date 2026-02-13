@@ -3,7 +3,7 @@ import google.generativeai as genai
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify
 
-# 🔑 Сизнинг API Key (скриншотдан олинди)
+# app.py ичидаги мана шу қаторни топинг ва алмаштиринг:
 API_KEY = "AIzaSyCNStlqZ1QFdTQJaenHXjndnBuDACzRKq4"
 genai.configure(api_key=API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
@@ -76,3 +76,4 @@ def api_search():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
