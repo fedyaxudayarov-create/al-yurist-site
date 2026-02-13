@@ -1,56 +1,98 @@
-async function runSearch(){
-    const text = txt.value.trim();
-    if(!text) return;
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AL Юрист — AI Ёрдамчи</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background: #f4f7f9; margin: 0; padding: 20px; color: #333; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; text-align: center; }
+        textarea { width: 100%; height: 100px; padding: 15px; border: 2px solid #ddd; border-radius: 8px; font-size: 16px; box-sizing: border-box; }
+        button { background: #007bff; color: white; border: none; padding: 12px 25px; border-radius: 8px; cursor: pointer; font-size: 16px; margin-top: 10px; width: 100%; transition: 0.3s; }
+        button:hover { background: #0056b3; }
+        #stat { text-align: center; margin-top: 10px; color: #666; font-weight: bold; }
+        .ai-box { background: #eef6ff; border-left: 5px solid #007bff; padding: 20px; border-radius: 8px; margin: 20px 0; line-height: 1.6; }
+        .item { border: 1px solid #eee; padding: 15px; border-radius: 8px; margin-bottom: 15px; background: #fff; }
+        .item-head { display: flex; justify-content: space-between; font-weight: bold; color: #2c3e50; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+        .link { color: #007bff; text-decoration: none; font-size: 0.9em; }
+        .item-text { margin-top: 10px; font-size: 0.95em; color: #555; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
 
-    results.innerHTML = "";
-    stat.textContent = "🤖 AI Юрист ўйламоқда...";
+<div class="container">
+    <h1>⚖️ AL Юрист AI</h1>
+    <p style="text-align: center;">Саволингизни ёзинг, AI базадан топган қонунлар асосида жавоб беради.</p>
     
-    try {
-        const r = await fetch("/api/search", {
-            method:"POST",
-            headers:{ "Content-Type":"application/json" },
-            body: JSON.stringify({ cat, mode, text })
-        });
-        const data = await r.json();
+    <textarea id="txt" placeholder="Масалан: Ишдан бўшатиш тартиби қандай?"></textarea>
+    <button onclick="runSearch()">Қидириш ва AI Таҳлил</button>
+    
+    <div id="stat"></div>
+    <div id="results"></div>
+</div>
+
+<script>
+    async function runSearch(){
+        const txt = document.getElementById("txt");
+        const results = document.getElementById("results");
+        const stat = document.getElementById("stat");
+        const text = txt.value.trim();
         
-        if(!data.ok){
-            stat.textContent = "Хатолик юз берди: " + (data.error || "");
-            return;
-        }
+        if(!text) return;
 
-        stat.textContent = "";
-        let finalHtml = "";
+        results.innerHTML = "";
+        stat.textContent = "🤖 AI Юрист базани ўқиб, жавоб тайёрламоқда...";
+        
+        try {
+            const r = await fetch("/api/search", {
+                method:"POST",
+                headers:{ "Content-Type":"application/json" },
+                body: JSON.stringify({ cat: "mehnat", text: text })
+            });
+            const data = await r.json();
+            
+            if(!data.ok){
+                stat.textContent = "Хатолик: " + (data.error || "Уланишда хато");
+                return;
+            }
 
-        // 🤖 AI жавобини чиқариш
-        if(data.ai_comment){
-            finalHtml += `
-                <div class="ai-box" style="background: #eef6ff; border-left: 5px solid #007bff; padding: 20px; border-radius: 8px; margin-bottom: 25px;">
-                    <h3 style="margin-top:0; color:#007bff;">✨ AI Маслаҳати:</h3>
-                    <div style="font-size: 1.1em; color: #333;">${data.ai_comment.replace(/\n/g, '<br>')}</div>
-                </div>
-            `;
-        }
+            stat.textContent = "";
+            let finalHtml = "";
 
-        // 📚 Базадан топилган моддаларни чиқариш
-        const list = data.results || [];
-        if(list.length > 0){
-            finalHtml += `<h4 style="margin-bottom:10px;">Манба сифатида фойдаланилган моддалар:</h4>`;
-            finalHtml += list.map(it=>`
-                <div class="item" style="border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background: #fff;">
-                    <div class="item-head" style="display:flex; justify-content:space-between;">
-                        <strong>${it.code_title} — Модда ${it.article_no}</strong>
-                        <a href="${it.url}" target="_blank" class="link">lex.uz ↗</a>
+            if(data.ai_comment){
+                finalHtml += `
+                    <div class="ai-box">
+                        <h3 style="margin-top:0; color:#007bff;">✨ AI Маслаҳати:</h3>
+                        <div>${data.ai_comment.replace(/\n/g, '<br>')}</div>
                     </div>
-                    <div class="item-text" style="margin-top:10px; font-size: 0.9em; color: #555;">${it.snippet}</div>
-                </div>
-            `).join("");
-        } else {
-            finalHtml += `<div class="empty">Базадан аниқ модда топилмади.</div>`;
+                `;
+            }
+
+            const list = data.results || [];
+            if(list.length > 0){
+                finalHtml += `<h4 style="margin-bottom:10px;">Асос сифатида олинган моддалар:</h4>`;
+                finalHtml += list.map(it=>`
+                    <div class="item">
+                        <div class="item-head">
+                            <span>${it.code_title} — Модда ${it.article_no}</span>
+                            <a href="${it.url}" target="_blank" class="link">lex.uz ↗</a>
+                        </div>
+                        <div class="item-text">${it.snippet}</div>
+                    </div>
+                `).join("");
+            } else {
+                finalHtml += `<div style="text-align:center; padding:20px; color:#999;">Базадан аниқ модда топилмади.</div>`;
+            }
+
+            results.innerHTML = finalHtml;
+
+        } catch(e) {
+            stat.textContent = "Сервер билан алоқа йўқ.";
+            console.error(e);
         }
-
-        results.innerHTML = finalHtml;
-
-    } catch(e) {
-        stat.textContent = "Уланишда хатолик.";
     }
-}
+</script>
+
+</body>
+</html>
