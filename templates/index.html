@@ -14,7 +14,7 @@ async function runSearch(){
         const data = await r.json();
         
         if(!data.ok){
-            stat.textContent = "Хатолик юз берди.";
+            stat.textContent = "Хатолик юз берди: " + (data.error || "");
             return;
         }
 
@@ -24,7 +24,7 @@ async function runSearch(){
         // 🤖 AI жавобини чиқариш
         if(data.ai_comment){
             finalHtml += `
-                <div class="ai-response-box" style="background: #eef6ff; border-left: 5px solid #007bff; padding: 20px; border-radius: 8px; margin-bottom: 25px; line-height: 1.6;">
+                <div class="ai-box" style="background: #eef6ff; border-left: 5px solid #007bff; padding: 20px; border-radius: 8px; margin-bottom: 25px;">
                     <h3 style="margin-top:0; color:#007bff;">✨ AI Маслаҳати:</h3>
                     <div style="font-size: 1.1em; color: #333;">${data.ai_comment.replace(/\n/g, '<br>')}</div>
                 </div>
@@ -34,14 +34,14 @@ async function runSearch(){
         // 📚 Базадан топилган моддаларни чиқариш
         const list = data.results || [];
         if(list.length > 0){
-            finalHtml += `<h4 style="margin-bottom:15px; color:#555;">Манба сифатида фойдаланилган моддалар:</h4>`;
+            finalHtml += `<h4 style="margin-bottom:10px;">Манба сифатида фойдаланилган моддалар:</h4>`;
             finalHtml += list.map(it=>`
                 <div class="item" style="border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin-bottom: 15px; background: #fff;">
-                    <div class="item-head" style="display:flex; justify-content:space-between; margin-bottom:10px;">
-                        <strong style="color: #2c3e50;">${it.code_title} — Модда ${it.article_no}</strong>
-                        <a href="${it.url}" target="_blank" style="color:#007bff; text-decoration:none; font-size:0.9em;">lex.uz ↗</a>
+                    <div class="item-head" style="display:flex; justify-content:space-between;">
+                        <strong>${it.code_title} — Модда ${it.article_no}</strong>
+                        <a href="${it.url}" target="_blank" class="link">lex.uz ↗</a>
                     </div>
-                    <div class="item-text" style="font-size: 0.95em; color: #666;">${it.snippet}</div>
+                    <div class="item-text" style="margin-top:10px; font-size: 0.9em; color: #555;">${it.snippet}</div>
                 </div>
             `).join("");
         } else {
