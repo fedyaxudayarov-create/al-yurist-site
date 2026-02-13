@@ -137,17 +137,27 @@ def home():
     # UI сизда templates/index.html да турибди
     return render_template("index.html")
 
-@app.route("/api/search", methods=["GET"])
+@app.route("/api/search", methods=["POST"])
 def api_search():
-    q = request.args.get("q", "")
-    source = request.args.get("source", "").strip() or None
-    mode = request.args.get("mode", "q")  # q = keyword, a = "asos topish"
-    # mode ҳозирча бир хил: иккаласида ҳам q текстдан излайди
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    cat = (data.get("cat") or "mehnat").strip()
+    mode = (data.get("mode") or "q").strip()
 
-    results = score_query(q, source_filter=source, limit=25)
-    return jsonify({"ok": True, "count": len(results), "results": results, "mode": mode})
+    if not text:
+        return jsonify({"ok": False, "error": "text is empty", "results": []}), 400
 
-@app.route("/api/sources", methods=["GET"])
+    if cat == "hr":
+        return jsonify({"ok": True, "results": search_hr(text)})
+
+    if mode == "doc":
+        kws = extract_keywords(text)
+        q = " ".join(kws[:8])
+        results = search_fts(q, cat)
+        return jsonify({"ok": True, "keywords": kws, "query": q, "results": results})
+
+    results = search_fts(text, cat)
+    return jsonify({"ok": True, "results": results})@app.route("/api/sources", methods=["GET"])
 def api_sources():
     sources = INDEX.get("sources", [])
     out = []
