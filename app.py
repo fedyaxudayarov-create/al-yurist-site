@@ -8,39 +8,27 @@ DB_PATH = DATA_DIR / "lex_index.db"
 
 app = Flask(__name__)
 
+# Сизнинг index.html даги тугмачалар учун категориялар рўйхати
+CATEGORIES = [
+    {"key": "mehnat", "title": "Меҳнат кодекси"},
+    {"key": "jinoyat", "title": "Жиноят кодекси"},
+    {"key": "mamuriy", "title": "Маъмурий кодекс"},
+    {"key": "konstitutsiya", "title": "Конституция"},
+    {"key": "fuqarolik", "title": "Фуқаролик кодекси"},
+    {"key": "davlat_xizmati", "title": "Давлат хизмати"}
+]
+
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-def search_fts(text, cat):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # Категория бўйича филтрлаш ва қидириш
-    query = """
-        SELECT items.* FROM items 
-        JOIN items_fts ON items.id = items_fts.rowid 
-        WHERE items_fts MATCH ? AND items.code_key = ?
-        LIMIT 10
-    """
-    # Агар категория 'all' бўлса ёки филтрсиз қидирмоқчи бўлсангиз, сўровни ўзгартириш мумкин
-    rows = cur.execute(query, (text, cat)).fetchall()
-    conn.close()
-    
-    results = []
-    for row in rows:
-        results.append({
-            "source_label": row["code_title"],
-            "modda": row["article_no"],
-            "title": row["title"],
-            "snippet": row["text"][:400] + "..." if len(row["text"]) > 400 else row["text"]
-        })
-    return results
-
 @app.route("/", methods=["GET"])
 def home():
-    return render_template("index.html")
+    # index.html кутаётган категорияларни юборамиз
+    current_cat = request.args.get("cat", "mehnat")
+    current_mode = request.args.get("mode", "q")
+    return render_template("index.html", categories=CATEGORIES, cat=current_cat, mode=current_mode)
 
 @app.route("/api/search", methods=["POST"])
 def api_search():
@@ -49,14 +37,38 @@ def api_search():
     cat = (data.get("cat") or "mehnat").strip()
 
     if not text:
-        return jsonify({"ok": False, "error": "Матн киритилмаган", "results": []}), 400
+        return jsonify({"ok": False, "error": "Матн бўш"}), 400
 
     try:
-        # Хатолик шу ерда эди: search_fts функцияси энди таърифланган
-        results = search_fts(text, cat)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Қидирув сўрови (FTS5 технологияси билан)
+        # Агар матнда иккита сўз бўлса, уларни 'AND' билан боғлаймиз
+        search_query = " AND ".join(text.split())
+        
+        query = """
+            SELECT items.* FROM items 
+            JOIN items_fts ON items.id = items_fts.rowid 
+            WHERE items_fts MATCH ? AND items.code_key = ?
+            LIMIT 15
+        """
+        rows = cur.execute(query, (search_query, cat)).fetchall()
+        conn.close()
+
+        results = []
+        for row in rows:
+            results.append({
+                "code_title": row["code_title"],
+                "article_no": row["article_no"],
+                "title": row["title"],
+                "snippet": row["text"][:450] + "...",
+                "url": row["url"] if row["url"] else "https://lex.uz"
+            })
+        
         return jsonify({"ok": True, "results": results})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "results": []}), 500
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
