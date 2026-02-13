@@ -1,140 +1,45 @@
-# app.py
-import json
-import math
-import re
+import sqlite3
 from pathlib import Path
-from collections import defaultdict
-
 from flask import Flask, render_template, request, jsonify
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-INDEX_PATH = DATA_DIR / "search_index.json"
+DB_PATH = DATA_DIR / "lex_index.db"
 
 app = Flask(__name__)
 
-# --- translit helpers (same as build_index) ---
-_LAT2CYR = str.maketrans({
-    "a": "а", "b": "б", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "ҳ", "i": "и", "j": "ж",
-    "k": "к", "l": "л", "m": "м", "n": "н", "o": "о", "p": "п", "q": "қ", "r": "р",
-    "s": "с", "t": "т", "u": "у", "v": "в", "x": "х", "y": "й", "z": "з",
-})
-_CYR2LAT = str.maketrans({
-    "а": "a", "б": "b", "д": "d", "е": "e", "ф": "f", "г": "g", "ҳ": "h", "и": "i", "ж": "j",
-    "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "қ": "q", "р": "r",
-    "с": "s", "т": "t", "у": "u", "в": "v", "х": "x", "й": "y", "з": "z",
-    "ў": "o", "ғ": "g", "ш": "sh", "ч": "ch",
-})
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def lat_to_cyr(s: str) -> str:
-    return s.lower().translate(_LAT2CYR)
-
-def cyr_to_lat(s: str) -> str:
-    return s.lower().translate(_CYR2LAT)
-
-def tokenize(text: str) -> list[str]:
-    text = (text or "").lower()
-    parts = re.findall(r"[a-zа-яёғўқҳчш0-9]+", text, flags=re.IGNORECASE)
-    return [p for p in parts if p]
-
-# --- load index ---
-INDEX = None
-DOCS = None
-INVERTED = None
-IDF = None
-
-SOURCE_LABELS = {
-    "mehnat_kodeksi": "Меҳнат кодекси",
-    "mamuriy_kodeks": "Маъмурий жавобгарлик (МЖтК)",
-    "jinoyat_kodeksi": "Жиноят кодекси",
-    "konstitutsiya": "Конституция",
-    "davlat_xizmati": "Давлат фуқаролик хизмати",
-    "fuqarolik_kodeksi": "Фуқаролик кодекси",
-    "mahalliy_hokimiyat": "Маҳаллий давлат ҳокимияти тўғрисида",
-}
-
-def load_index():
-    global INDEX, DOCS, INVERTED, IDF
-    if not INDEX_PATH.exists():
-        INDEX = {"docs": [], "inverted": {}, "meta": {}}
-        DOCS, INVERTED, IDF = [], {}, {}
-        return
-
-    INDEX = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
-    DOCS = INDEX.get("docs", [])
-    INVERTED = INDEX.get("inverted", {})
-
-    # compute idf
-    N = max(1, len(DOCS))
-    df = {}
-    for tok, postings in INVERTED.items():
-        df[tok] = len(postings)
-    IDF = {t: math.log((N + 1) / (dfv + 1)) + 1.0 for t, dfv in df.items()}
-
-load_index()
-
-def score_query(query: str, source_filter: str | None = None, limit: int = 20):
-    if not query or not query.strip():
-        return []
-
-    q = query.strip()
-    qtoks = tokenize(q)
-
-    # add translit variants (query side)
-    extra = []
-    for t in qtoks:
-        extra.append(cyr_to_lat(t))
-        extra.append(lat_to_cyr(t))
-    qtoks = qtoks + extra
-
-    # detect "modda" number
-    modda_num = None
-    m = re.search(r"(\d{1,4})", q)
-    if m:
-        modda_num = m.group(1)
-
-    scores = defaultdict(float)
-    matched = set()
-
-    for t in qtoks:
-        postings = INVERTED.get(t)
-        if not postings:
-            continue
-        idf = IDF.get(t, 1.0)
-        for doc_idx, tf in postings:
-            d = DOCS[doc_idx]
-            if source_filter and d.get("source") != source_filter:
-                continue
-            scores[doc_idx] += (1.0 + math.log(1 + tf)) * idf
-            matched.add(doc_idx)
-
-    # boost exact modda match
-    if modda_num:
-        for doc_idx in list(matched):
-            d = DOCS[doc_idx]
-            if str(d.get("modda", "")).strip() == modda_num:
-                scores[doc_idx] += 5.0
-
-    ranked = sorted(matched, key=lambda i: scores[i], reverse=True)[:limit]
-
+def search_fts(text, cat):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Категория бўйича филтрлаш ва қидириш
+    query = """
+        SELECT items.* FROM items 
+        JOIN items_fts ON items.id = items_fts.rowid 
+        WHERE items_fts MATCH ? AND items.code_key = ?
+        LIMIT 10
+    """
+    # Агар категория 'all' бўлса ёки филтрсиз қидирмоқчи бўлсангиз, сўровни ўзгартириш мумкин
+    rows = cur.execute(query, (text, cat)).fetchall()
+    conn.close()
+    
     results = []
-    for i in ranked:
-        d = DOCS[i]
-        text = d.get("text", "")
-        snippet = text[:420].replace("\n", " ")
+    for row in rows:
         results.append({
-            "source": d.get("source"),
-            "source_label": SOURCE_LABELS.get(d.get("source"), d.get("source")),
-            "modda": d.get("modda"),
-            "title": d.get("title", ""),
-            "snippet": snippet + ("..." if len(text) > 420 else ""),
-            "score": round(scores[i], 4),
+            "source_label": row["code_title"],
+            "modda": row["article_no"],
+            "title": row["title"],
+            "snippet": row["text"][:400] + "..." if len(row["text"]) > 400 else row["text"]
         })
     return results
 
 @app.route("/", methods=["GET"])
 def home():
-    # UI сизда templates/index.html да турибди
     return render_template("index.html")
 
 @app.route("/api/search", methods=["POST"])
@@ -142,29 +47,16 @@ def api_search():
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
     cat = (data.get("cat") or "mehnat").strip()
-    mode = (data.get("mode") or "q").strip()
 
     if not text:
-        return jsonify({"ok": False, "error": "text is empty", "results": []}), 400
+        return jsonify({"ok": False, "error": "Матн киритилмаган", "results": []}), 400
 
-    if cat == "hr":
-        return jsonify({"ok": True, "results": search_hr(text)})
-
-    if mode == "doc":
-        kws = extract_keywords(text)
-        q = " ".join(kws[:8])
-        results = search_fts(q, cat)
-        return jsonify({"ok": True, "keywords": kws, "query": q, "results": results})
-
-    results = search_fts(text, cat)
-    return jsonify({"ok": True, "results": results})@app.route("/api/sources", methods=["GET"])
-def api_sources():
-    sources = INDEX.get("sources", [])
-    out = []
-    for s in sources:
-        out.append({"key": s, "label": SOURCE_LABELS.get(s, s)})
-    return jsonify({"ok": True, "sources": out})
+    try:
+        # Хатолик шу ерда эди: search_fts функцияси энди таърифланган
+        results = search_fts(text, cat)
+        return jsonify({"ok": True, "results": results})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "results": []}), 500
 
 if __name__ == "__main__":
-    # Локалда ишлатиш учун
     app.run(host="0.0.0.0", port=5000, debug=True)
