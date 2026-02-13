@@ -7,16 +7,16 @@ APP_DIR = Path(__file__).parent
 DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "lex_index.db"
 
-# файл номи -> категория (app.py dagi key’лар)
+# файл номи -> категория
 MAP = {
     "mehnat_kodeksi": "mehnat",
     "jinoyat_kodeksi": "jinoyat",
-    "mamuriy_kodeks": "mamuriy",
+    "mamuriy_kodeks": "mamuriy", # Сиздаги файл номига мосланди
     "konstitutsiya": "konstitutsiya",
     "davlat_xizmati": "davlat_xizmati",
     "fuqarolik_kodeksi": "fuqarolik",
+    "mahalliy_hokimiyat": "mamuriy" # Буни ҳам қўшиб қўйдик
 }
-
 ARTICLE_RE = re.compile(r"(?mi)^(?:Модда|Modda|Статья|Article)\s+(\d+)\s*[\.\-–:]?\s*(.*)$")
 
 def detect_code_key(stem: str) -> str:
