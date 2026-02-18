@@ -13,6 +13,10 @@ load_dotenv()
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY"),
+    default_headers={
+        "HTTP-Referer": "https://al-yurist-site.onrender.com",
+        "X-Title": "AL Yurist AI",
+    },
 )
 
 OPENAI_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
@@ -95,4 +99,5 @@ def api_search():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
 
