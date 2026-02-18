@@ -10,7 +10,12 @@ from openai import OpenAI
 load_dotenv()
 
 # OpenAI клиента (калит OPENAI_API_KEY орқали автомат ўқилади)
-client = OpenAI()
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+)
+
+OPENAI_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
 
 # Агар хоҳласангиз .env га OPENAI_MODEL ҳам қўшиб бошқаришингиз мумкин
 # Масалан: OPENAI_MODEL=gpt-5.2
@@ -90,3 +95,4 @@ def api_search():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
+
